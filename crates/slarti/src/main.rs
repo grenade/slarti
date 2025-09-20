@@ -199,19 +199,49 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1000.0), px(700.0)), cx);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| {
-                // Build the terminal panel from slarti-term.
-                let terminal = cx.new(|cx| TerminalView::new(cx, TerminalConfig::default()));
-                // Build the container that will host panels (terminal and future ones).
-                cx.new(|cx| ContainerView::new(cx, terminal))
-            },
-        )
-        .unwrap();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |_, cx| {
+                    // Build the terminal panel from slarti-term.
+                    let terminal = cx.new(|cx| TerminalView::new(cx, TerminalConfig::default()));
+                    // Build the container that will host panels (terminal and future ones).
+                    cx.new(|cx| ContainerView::new(cx, terminal))
+                },
+            )
+            .unwrap();
+
+        // Capture the container entity to forward keystrokes to the terminal panel.
+        let container = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+
+        cx.observe_keystrokes(move |ev, _, cx| {
+            if let Some(ch) = ev.keystroke.key_char.clone() {
+                let bytes = ch.to_string().into_bytes();
+                let _ = container.update(cx, |cv, cx| {
+                    cv.terminal.update(cx, |term, _| term.write_bytes(&bytes));
+                });
+            } else {
+                let name = ev.keystroke.unparse();
+                let seq: Option<&[u8]> = match name.as_str() {
+                    "enter" => Some(b"\r"),
+                    "backspace" => Some(b"\x7f"),
+                    "left" => Some(b"\x1b[D"),
+                    "right" => Some(b"\x1b[C"),
+                    "up" => Some(b"\x1b[A"),
+                    "down" => Some(b"\x1b[B"),
+                    _ => None,
+                };
+                if let Some(bytes) = seq {
+                    let _ = container.update(cx, |cv, cx| {
+                        cv.terminal.update(cx, |term, _| term.write_bytes(bytes));
+                    });
+                }
+            }
+        })
+        .detach();
 
         cx.activate(true);
     });
