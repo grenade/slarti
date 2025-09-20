@@ -332,7 +332,15 @@ impl gpui::Render for TerminalView {
             .bg(bg)
             .text_color(fg)
             .when(!self.collapsed, |d| {
-                d.child(TerminalCanvasElement { engine, theme })
+                d.child(TerminalCanvasElement {
+                    engine,
+                    theme,
+                    cell_w: 8.0,
+                    cell_h: 16.0,
+                    cache: Vec::new(),
+                    last_cols: 0,
+                    last_rows: 0,
+                })
             });
 
         // Footer
@@ -373,6 +381,14 @@ impl gpui::Render for TerminalView {
 struct TerminalCanvasElement {
     engine: Arc<Mutex<Engine>>,
     theme: Theme,
+    // Measured cell metrics
+    cell_w: f32,
+    cell_h: f32,
+    // Cache of shaped lines for damage-aware rendering
+    cache: Vec<Option<gpui::ShapedLine>>,
+    // Last known terminal dimensions
+    last_cols: usize,
+    last_rows: usize,
 }
 
 impl IntoElement for TerminalCanvasElement {
@@ -411,11 +427,47 @@ impl Element for TerminalCanvasElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
+        // Measure cell size with current font
+        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+        let ref_line = window.text_system().shape_line(
+            SharedString::from("W"),
+            font_size,
+            &[TextRun {
+                len: 1,
+                font: window.text_style().font(),
+                color: window.text_style().color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+        self.cell_w = ref_line.x_for_index(1).0.max(1.0);
+        self.cell_h = window.line_height().0.max(1.0);
+
+        // Compute desired cols/rows from bounds and cell size
+        let width = (bounds.right() - bounds.left()).0;
+        let height = (bounds.bottom() - bounds.top()).0;
+        let cols = (width / self.cell_w).floor().max(1.0) as usize;
+        let rows = (height / self.cell_h).floor().max(1.0) as usize;
+
+        // Resize engine and reset cache if dimensions changed
+        if self.last_cols != cols || self.last_rows != rows {
+            self.last_cols = cols;
+            self.last_rows = rows;
+            self.cache = vec![None; rows];
+            if let Ok(mut eng) = self.engine.lock() {
+                eng.resize(cols, rows);
+            }
+        } else if self.cache.len() != rows {
+            self.cache.resize(rows, None);
+        }
+
         ()
     }
 
@@ -429,7 +481,7 @@ impl Element for TerminalCanvasElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Background
+        // Paint panel background
         window.paint_quad(gpui::fill(
             bounds,
             gpui::hsla(
@@ -440,91 +492,108 @@ impl Element for TerminalCanvasElement {
             ),
         ));
 
-        // Measure a representative cell size
-        let style = window.text_style();
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let ref_line = window.text_system().shape_line(
-            SharedString::from("W"),
-            font_size,
-            &[TextRun {
-                len: 1,
-                font: style.font(),
-                color: gpui::hsla(
-                    self.theme.fg.0,
-                    self.theme.fg.1,
-                    self.theme.fg.2,
-                    self.theme.fg.3,
-                ),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        );
-        let cell_w = ref_line.x_for_index(1).0.max(1.0);
-        let cell_h = window.line_height().0.max(1.0);
+        // Shape only damaged/missing rows; cache results
+        let (rows, cols, cursor_line, cursor_col, damaged_lines) =
+            if let Ok(mut eng) = self.engine.lock() {
+                let rows = eng.term.screen_lines();
+                let cols = eng.term.columns();
 
-        // Snapshot dimensions and cursor position
-        let (rows, cols, cursor_line, cursor_col) = if let Ok(eng) = self.engine.lock() {
-            (
-                eng.term.screen_lines(),
-                eng.term.columns(),
-                eng.term.grid().cursor.point.line.0.max(0) as usize,
-                eng.term.grid().cursor.point.column.0,
-            )
-        } else {
-            (0, 0, 0, 0)
-        };
-        if rows == 0 || cols == 0 {
-            return;
-        }
-
-        // Render each row as shaped text
-        let mut origin = bounds.origin;
-        for y in 0..rows {
-            let line_text = if let Ok(eng) = self.engine.lock() {
-                let mut s = String::with_capacity(cols);
-                for x in 0..cols {
-                    let ch = eng.term.grid()[Line(y as i32)][Column(x)].c;
-                    s.push(ch);
+                // Collect damaged rows
+                let mut damaged = vec![false; rows];
+                match alacritty_terminal::term::TermDamage::Full {
+                    _ => match eng.term.damage() {
+                        alacritty_terminal::term::TermDamage::Full => {
+                            for r in 0..rows {
+                                damaged[r] = true;
+                            }
+                        }
+                        alacritty_terminal::term::TermDamage::Partial(mut it) => {
+                            while let Some(line) = it.next() {
+                                if line.line < rows {
+                                    damaged[line.line] = true;
+                                }
+                            }
+                        }
+                    },
                 }
-                s
+
+                // Always shape missing cache entries
+                for r in 0..rows {
+                    if self.cache.get(r).and_then(|o| o.as_ref()).is_none() {
+                        damaged[r] = true;
+                    }
+                }
+
+                let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+                for y in 0..rows {
+                    if !damaged[y] {
+                        continue;
+                    }
+                    let mut line_text = String::with_capacity(cols);
+                    for x in 0..cols {
+                        let ch = eng.term.grid()[Line(y as i32)][Column(x)].c;
+                        line_text.push(ch);
+                    }
+
+                    let run = TextRun {
+                        len: line_text.len(),
+                        font: window.text_style().font(),
+                        color: gpui::hsla(
+                            self.theme.fg.0,
+                            self.theme.fg.1,
+                            self.theme.fg.2,
+                            self.theme.fg.3,
+                        ),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(line_text),
+                        font_size,
+                        &[run],
+                        None,
+                    );
+                    if y < self.cache.len() {
+                        self.cache[y] = Some(shaped);
+                    }
+                }
+
+                // Reset damage after handling
+                eng.term.reset_damage();
+
+                let cursor = eng.term.grid().cursor.point;
+                (
+                    rows,
+                    cols,
+                    cursor.line.0.max(0) as usize,
+                    cursor.column.0,
+                    damaged,
+                )
             } else {
-                String::new()
+                // If engine not available, nothing to paint
+                return;
             };
 
-            let shaped = window.text_system().shape_line(
-                SharedString::from(line_text),
-                font_size,
-                &[TextRun {
-                    len: cols,
-                    font: style.font(),
-                    color: gpui::hsla(
-                        self.theme.fg.0,
-                        self.theme.fg.1,
-                        self.theme.fg.2,
-                        self.theme.fg.3,
-                    ),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
-            let _ = shaped.paint(origin, window.line_height(), window, cx);
-
-            origin.y += gpui::px(cell_h);
+        // Paint cached shaped lines
+        let mut origin = bounds.origin;
+        for y in 0..rows.min(self.cache.len()) {
+            if let Some(mut shaped) = self.cache[y].take() {
+                let _ = shaped.paint(origin, window.line_height(), window, cx);
+                self.cache[y] = Some(shaped);
+            }
+            origin.y += gpui::px(self.cell_h);
             if origin.y > bounds.bottom() {
                 break;
             }
         }
 
-        // Cursor block
-        let cursor_x = bounds.left().0 + cursor_col as f32 * cell_w;
-        let cursor_y = bounds.top().0 + cursor_line as f32 * cell_h;
+        // Draw a solid cursor block with theme color
+        let cursor_x = bounds.left().0 + cursor_col as f32 * self.cell_w;
+        let cursor_y = bounds.top().0 + cursor_line as f32 * self.cell_h;
         let cursor_bounds = Bounds::new(
             gpui::point(gpui::px(cursor_x), gpui::px(cursor_y)),
-            gpui::size(gpui::px(cell_w), gpui::px(cell_h)),
+            gpui::size(gpui::px(self.cell_w), gpui::px(self.cell_h)),
         );
         window.paint_quad(gpui::fill(
             cursor_bounds,
