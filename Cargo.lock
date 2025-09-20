@@ -4948,13 +4948,12 @@ checksum = "7a2ae44ef20feb57a68b23d846850f861394c2e02dc425a50098ae8c90267589"
 name = "slarti"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
  "anyhow",
  "bytes",
  "gpui",
- "portable-pty",
  "serde",
  "serde_json",
+ "slarti-term",
  "tokio",
 ]
 
@@ -4993,6 +4992,16 @@ dependencies = [
  "serde_json",
  "slarti-proto",
  "tokio",
+]
+
+[[package]]
+name = "slarti-term"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "gpui",
+ "portable-pty",
 ]
 
 [[package]]

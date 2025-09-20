@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/slarti",
+    "crates/slarti-term",
     "crates/slarti-remote",
     "crates/slarti-ssh",
     "crates/slarti-proto",

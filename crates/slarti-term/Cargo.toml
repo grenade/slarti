@@ -1,0 +1,17 @@
+[package]
+name = "slarti-term"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal engine + renderer for Slarti (PTY + alacritty_terminal + GPUI)"
+license = "Apache-2.0"
+
+[lib]
+name = "slarti_term"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
+[dependencies]
+anyhow = { workspace = true }
+gpui = { workspace = true }
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }

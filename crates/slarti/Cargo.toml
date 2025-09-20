@@ -10,5 +10,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 gpui = { workspace = true }
-portable-pty = { workspace = true }
-alacritty_terminal = { workspace = true }
+slarti-term = { path = "../slarti-term" }
