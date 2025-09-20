@@ -7,8 +7,8 @@ use std::{
 use anyhow::Result;
 use gpui::{
     div, prelude::*, px, relative, App, Bounds, Context, Element, ElementId, FocusHandle,
-    Focusable, GlobalElementId, LayoutId, MouseButton, MouseUpEvent, Pixels, SharedString, Style,
-    TextRun, Window,
+    Focusable, GlobalElementId, LayoutId, MouseUpEvent, Pixels, SharedString, Style, TextRun,
+    Window,
 };
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
@@ -218,6 +218,7 @@ impl TerminalView {
     /// Construct a new `TerminalView`.
     pub fn new(cx: &mut Context<Self>, config: TerminalConfig) -> Self {
         let (engine, writer) = Engine::new(80, 24).expect("create terminal engine");
+
         Self {
             focus: cx.focus_handle(),
             title: config.title,
@@ -324,45 +325,25 @@ impl gpui::Render for TerminalView {
                     .child(self.title.clone()),
             );
 
-        // Content
+        // Content fills remaining space and always shows the canvas
         let engine = self.engine.clone();
         let content = div()
             .flex()
+            .flex_col()
             .size_full()
             .bg(bg)
             .text_color(fg)
-            .when(!self.collapsed, |d| {
-                d.child(TerminalCanvasElement {
-                    engine,
-                    theme,
-                    cell_w: 8.0,
-                    cell_h: 16.0,
-                    cache: Vec::new(),
-                    last_cols: 0,
-                    last_rows: 0,
-                })
+            .child(TerminalCanvasElement {
+                engine,
+                theme,
+                cell_w: 8.0,
+                cell_h: 16.0,
+                cache: Vec::new(),
+                last_cols: 0,
+                last_rows: 0,
             });
 
-        // Footer
-        let footer = div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .gap_2()
-            .h(px(28.))
-            .px(px(8.))
-            .bg(bg)
-            .child(
-                div()
-                    .px_2()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(gpui::opaque_grey(0.2, 0.7))
-                    .text_color(fg)
-                    .cursor_pointer()
-                    .child(if self.collapsed { "Expand" } else { "Collapse" })
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle)),
-            );
+        // Footer removed from terminal panel; collapse/expand belongs to outer container
 
         div()
             .key_context("TerminalView")
@@ -373,7 +354,6 @@ impl gpui::Render for TerminalView {
             .bg(bg)
             .child(header)
             .child(content)
-            .child(footer)
     }
 }
 
@@ -492,105 +472,98 @@ impl Element for TerminalCanvasElement {
             ),
         ));
 
-        // Shape only damaged/missing rows; cache results
-        let (rows, cols, cursor_line, cursor_col, damaged_lines) =
-            if let Ok(mut eng) = self.engine.lock() {
-                let rows = eng.term.screen_lines();
-                let cols = eng.term.columns();
+        // Shape and paint all rows each frame to ensure visibility (temporary simplification)
+        let (rows, cols, cursor_line, cursor_col) = if let Ok(eng) = self.engine.lock() {
+            (
+                eng.term.screen_lines(),
+                eng.term.columns(),
+                eng.term.grid().cursor.point.line.0.max(0) as usize,
+                eng.term.grid().cursor.point.column.0,
+            )
+        } else {
+            return;
+        };
 
-                // Collect damaged rows
-                let mut damaged = vec![false; rows];
-                match alacritty_terminal::term::TermDamage::Full {
-                    _ => match eng.term.damage() {
-                        alacritty_terminal::term::TermDamage::Full => {
-                            for r in 0..rows {
-                                damaged[r] = true;
-                            }
-                        }
-                        alacritty_terminal::term::TermDamage::Partial(mut it) => {
-                            while let Some(line) = it.next() {
-                                if line.line < rows {
-                                    damaged[line.line] = true;
-                                }
-                            }
-                        }
-                    },
+        // Ensure we have a valid font setup for shaping
+        let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+        let fg = gpui::hsla(
+            self.theme.fg.0,
+            self.theme.fg.1,
+            self.theme.fg.2,
+            self.theme.fg.3,
+        );
+
+        // Paint lines
+        let mut origin = bounds.origin;
+        // Track pixel-accurate cursor placement using shaped metrics
+        let mut cursor_px: Option<f32> = None;
+        let mut cursor_py: Option<f32> = None;
+        for y in 0..rows {
+            // Build plain text for the line
+            let line_text = if let Ok(eng) = self.engine.lock() {
+                let mut s = String::with_capacity(cols);
+                for x in 0..cols {
+                    let ch = eng.term.grid()[Line(y as i32)][Column(x)].c;
+                    s.push(ch);
                 }
-
-                // Always shape missing cache entries
-                for r in 0..rows {
-                    if self.cache.get(r).and_then(|o| o.as_ref()).is_none() {
-                        damaged[r] = true;
-                    }
-                }
-
-                let font_size = window.text_style().font_size.to_pixels(window.rem_size());
-                for y in 0..rows {
-                    if !damaged[y] {
-                        continue;
-                    }
-                    let mut line_text = String::with_capacity(cols);
-                    for x in 0..cols {
-                        let ch = eng.term.grid()[Line(y as i32)][Column(x)].c;
-                        line_text.push(ch);
-                    }
-
-                    let run = TextRun {
-                        len: line_text.len(),
-                        font: window.text_style().font(),
-                        color: gpui::hsla(
-                            self.theme.fg.0,
-                            self.theme.fg.1,
-                            self.theme.fg.2,
-                            self.theme.fg.3,
-                        ),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    let shaped = window.text_system().shape_line(
-                        SharedString::from(line_text),
-                        font_size,
-                        &[run],
-                        None,
-                    );
-                    if y < self.cache.len() {
-                        self.cache[y] = Some(shaped);
-                    }
-                }
-
-                // Reset damage after handling
-                eng.term.reset_damage();
-
-                let cursor = eng.term.grid().cursor.point;
-                (
-                    rows,
-                    cols,
-                    cursor.line.0.max(0) as usize,
-                    cursor.column.0,
-                    damaged,
-                )
+                s
             } else {
-                // If engine not available, nothing to paint
-                return;
+                String::new()
             };
 
-        // Paint cached shaped lines
-        let mut origin = bounds.origin;
-        for y in 0..rows.min(self.cache.len()) {
-            if let Some(mut shaped) = self.cache[y].take() {
-                let _ = shaped.paint(origin, window.line_height(), window, cx);
-                self.cache[y] = Some(shaped);
+            // Compute cursor byte index before shaping to avoid moving line_text
+            let byte_idx_opt = if y == cursor_line {
+                let mut idx = 0usize;
+                for (xi, ch) in line_text.chars().enumerate() {
+                    if xi >= cursor_col {
+                        break;
+                    }
+                    idx += ch.len_utf8();
+                }
+                Some(idx)
+            } else {
+                None
+            };
+
+            // Shape the line with explicit theme foreground color
+            let shaped = window.text_system().shape_line(
+                SharedString::from(line_text),
+                font_size,
+                &[TextRun {
+                    len: cols,
+                    font: window.text_style().font(),
+                    color: fg,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            );
+
+            // If this is the cursor line, compute pixel x from shaped metrics
+            if let Some(byte_idx) = byte_idx_opt {
+                let rel_x = shaped.x_for_index(byte_idx).0;
+                cursor_px = Some(bounds.left().0 + rel_x);
+                cursor_py = Some(origin.y.0);
             }
+
+            let _ = shaped.paint(origin, window.line_height(), window, cx);
+
             origin.y += gpui::px(self.cell_h);
             if origin.y > bounds.bottom() {
                 break;
             }
         }
 
-        // Draw a solid cursor block with theme color
-        let cursor_x = bounds.left().0 + cursor_col as f32 * self.cell_w;
-        let cursor_y = bounds.top().0 + cursor_line as f32 * self.cell_h;
+        // Draw a solid cursor block using shaped metrics when available
+        let (cursor_x, cursor_y) = if let (Some(px), Some(py)) = (cursor_px, cursor_py) {
+            (px, py)
+        } else {
+            (
+                bounds.left().0 + cursor_col as f32 * self.cell_w,
+                bounds.top().0 + cursor_line as f32 * self.cell_h,
+            )
+        };
         let cursor_bounds = Bounds::new(
             gpui::point(gpui::px(cursor_x), gpui::px(cursor_y)),
             gpui::size(gpui::px(self.cell_w), gpui::px(self.cell_h)),

@@ -133,19 +133,28 @@ impl gpui::Render for ContainerView {
                     ),
             );
 
-        // Content: stack child panels vertically (for now only Terminal).
+        // Content: make the terminal panel fill remaining space in the container.
         let content = {
-            // Ensure the content uses all available space, with a subtle bg.
+            // Container background
             let bg = gpui::rgb(0x0b0b0b);
+            // The terminal panel fills all remaining height
             let panel = div()
                 .flex()
                 .flex_col()
+                .size_full() // take all remaining vertical space
                 .w_full()
                 .border_b_1()
                 .border_color(chrome_border)
                 .when(!self.terminal_collapsed, |d| d.child(self.terminal.clone()));
 
-            div().flex().flex_col().size_full().bg(bg).child(panel)
+            // The content area itself also fills the available space
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .size_full()
+                .bg(bg)
+                .child(panel)
         };
 
         // Footer: buttons to expand/collapse child panels.
@@ -222,6 +231,7 @@ fn main() {
                 let bytes = ch.to_string().into_bytes();
                 let _ = container.update(cx, |cv, cx| {
                     cv.terminal.update(cx, |term, _| term.write_bytes(&bytes));
+                    cx.notify();
                 });
             } else {
                 let name = ev.keystroke.unparse();
@@ -237,6 +247,7 @@ fn main() {
                 if let Some(bytes) = seq {
                     let _ = container.update(cx, |cv, cx| {
                         cv.terminal.update(cx, |term, _| term.write_bytes(bytes));
+                        cx.notify();
                     });
                 }
             }
