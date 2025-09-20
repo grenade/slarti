@@ -1,0 +1,14 @@
+[package]
+name = "slarti-remote"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
+bytes = { workspace = true }
+dirs-next = { workspace = true }
+slarti-proto = { path = "../slarti-proto" }

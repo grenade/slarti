@@ -1,0 +1,13 @@
+[package]
+name = "slarti-ssh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+bytes = { workspace = true }
+slarti-proto = { path = "../slarti-proto" }
