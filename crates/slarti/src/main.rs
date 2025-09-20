@@ -22,7 +22,6 @@ use std::{
     thread,
 };
 
-static DEBUG_LOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Fixed terminal size for now. In a follow-up, wire this to window resize events.
 struct TermSize {
     columns: usize,
@@ -159,7 +158,7 @@ impl AppModel {
         }
         if cols != self.term.columns() || rows != self.term.screen_lines() {
             self.term.resize(TermSize::new(cols, rows));
-            let _ = self.master.lock().ok().map(|mut m| {
+            let _ = self.master.lock().ok().map(|m| {
                 let _ = m.resize(PtySize {
                     rows: rows as u16,
                     cols: cols as u16,
@@ -216,7 +215,6 @@ fn color_from_ansi(
         AnsiColor::Spec(AnsiRgb { r, g, b }) => Some((*r, *g, *b)),
         AnsiColor::Named(named) => palette[*named].map(|AnsiRgb { r, g, b }| (r, g, b)),
         AnsiColor::Indexed(i) => palette[*i as usize].map(|AnsiRgb { r, g, b }| (r, g, b)),
-        _ => None,
     }
 }
 struct Theme {
@@ -500,7 +498,7 @@ impl Element for TerminalSizer {
         let origin_x = bounds.left();
         let mut line_origin = gpui::point(origin_x, bounds.top());
         for row in 0..rows {
-            if let Some(mut shaped) = self.cache.get_mut(row).and_then(|o| o.take()) {
+            if let Some(shaped) = self.cache.get_mut(row).and_then(|o| o.take()) {
                 let y = bounds.top().0 + (row as f32 * self.cell_height);
                 line_origin.y = gpui::px(y);
                 let _ = shaped.paint(line_origin, window.line_height(), window, cx);
