@@ -66,9 +66,9 @@ impl Theme {
     /// Default: light text on dark background, blue-ish cursor.
     pub fn default_dark() -> Self {
         Self {
-            fg: (0.0, 0.0, 1.0, 1.0),      // white
-            bg: (0.0, 0.0, 0.05, 1.0),     // near-black
-            cursor: (0.66, 1.0, 0.5, 1.0), // blue-ish
+            fg: (0.0, 0.0, 1.0, 1.0),              // white
+            bg: (0.0, 0.0, 0.05, 1.0),             // near-black
+            cursor: (0.5847, 0.6957, 0.6784, 1.0), // #74ace6
         }
     }
 }
