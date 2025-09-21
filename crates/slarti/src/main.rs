@@ -241,12 +241,13 @@ impl ContainerView {
     // Split drag handlers
     fn on_split_mouse_down(
         &mut self,
-        ev: &MouseDownEvent,
-        _window: &mut Window,
+        _ev: &MouseDownEvent,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
         self.dragging_split = true;
-        self.last_split_y = ev.position.y.0;
+        // Use window-space Y to avoid local-coordinate jitter as layout changes.
+        self.last_split_y = window.mouse_position().y.0;
     }
 
     fn on_split_mouse_up(
@@ -267,12 +268,13 @@ impl ContainerView {
 
     fn on_split_mouse_move(
         &mut self,
-        ev: &MouseMoveEvent,
-        _window: &mut Window,
+        _ev: &MouseMoveEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.dragging_split {
-            let y = ev.position.y.0;
+            // Use window-space Y delta for stable dragging regardless of layout changes.
+            let y = window.mouse_position().y.0;
             let dy = y - self.last_split_y;
             self.last_split_y = y;
             // Adjust split height and clamp to sane bounds
@@ -461,6 +463,7 @@ impl gpui::Render for ContainerView {
                 .flex()
                 .flex_col()
                 .size_full()
+                .relative()
                 // Top half: host observability panel (placeholder content for now)
                 .child(
                     div()
@@ -502,6 +505,17 @@ impl gpui::Render for ContainerView {
                         .on_mouse_move(cx.listener(Self::on_split_mouse_move))
                         .bg(gpui::opaque_grey(0.2, 0.2)),
                 )
+                // Full overlay to capture mouse while dragging over the entire right pane
+                .when(self.dragging_split, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .inset(px(0.0))
+                            .cursor_ns_resize()
+                            .on_mouse_move(cx.listener(Self::on_split_mouse_move))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_split_mouse_up)),
+                    )
+                })
                 // Bottom half: terminal fills remaining space
                 .child(
                     div()
