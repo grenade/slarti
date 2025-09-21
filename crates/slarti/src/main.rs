@@ -2,7 +2,7 @@ use gpui::{
     div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
     MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Window, WindowBounds, WindowOptions,
 };
-use slarti_ui::Vector as UiVector;
+use slarti_ui::{FsAssets, Vector as UiVector};
 
 /// Minimal Vector wrapper around gpui::svg() to support Vector::color() like Zed.
 ///
@@ -156,6 +156,12 @@ impl gpui::Render for ContainerView {
         let title_bar_bg = gpui::rgb(0x141414);
         let chrome_border = gpui::opaque_grey(0.2, 0.7);
         let text_color = gpui::hsla(self.ui_fg.0, self.ui_fg.1, self.ui_fg.2, self.ui_fg.3);
+        let debug_icons = std::env::var("SLARTI_UI_DEBUG")
+            .map(|v| {
+                let v = v.to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on"
+            })
+            .unwrap_or(false);
 
         // Header: custom titlebar with drag-to-move and icon buttons
         let header = div()
@@ -200,6 +206,11 @@ impl gpui::Render for ContainerView {
                     .child(
                         div()
                             .size(px(14.0))
+                            .when(debug_icons, |d| {
+                                d.bg(gpui::opaque_grey(0.4, 0.5))
+                                    .border_1()
+                                    .border_color(gpui::yellow())
+                            })
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_minimize))
                             .child(
@@ -212,6 +223,11 @@ impl gpui::Render for ContainerView {
                     .child(
                         div()
                             .size(px(14.0))
+                            .when(debug_icons, |d| {
+                                d.bg(gpui::opaque_grey(0.4, 0.5))
+                                    .border_1()
+                                    .border_color(gpui::yellow())
+                            })
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_maximize))
                             .child(
@@ -224,6 +240,11 @@ impl gpui::Render for ContainerView {
                     .child(
                         div()
                             .size(px(14.0))
+                            .when(debug_icons, |d| {
+                                d.bg(gpui::opaque_grey(0.4, 0.5))
+                                    .border_1()
+                                    .border_color(gpui::yellow())
+                            })
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_close))
                             .child(
@@ -268,6 +289,11 @@ impl gpui::Render for ContainerView {
                 .child(
                     div()
                         .size(px(16.0))
+                        .when(debug_icons, |d| {
+                            d.bg(gpui::opaque_grey(0.4, 0.5))
+                                .border_1()
+                                .border_color(gpui::yellow())
+                        })
                         .cursor_pointer()
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal))
                         .child(
@@ -379,58 +405,64 @@ impl gpui::Render for ContainerView {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1000.0), px(700.0)), cx);
+    Application::new()
+        .with_assets(
+            FsAssets::new().with_root(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets"),
+            ),
+        )
+        .run(|cx: &mut App| {
+            let bounds = Bounds::centered(None, size(px(1000.0), px(700.0)), cx);
 
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                |_, cx| {
-                    // Build the terminal panel from slarti-term.
-                    let term_cfg = TerminalConfig::default();
-                    let ui_fg = term_cfg.theme.fg;
-                    let terminal = cx.new(|cx| TerminalView::new(cx, term_cfg));
-                    // Build the container that will host panels (terminal and future ones).
-                    cx.new(|cx| ContainerView::new(cx, terminal, ui_fg))
-                },
-            )
-            .unwrap();
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        ..Default::default()
+                    },
+                    |_, cx| {
+                        // Build the terminal panel from slarti-term.
+                        let term_cfg = TerminalConfig::default();
+                        let ui_fg = term_cfg.theme.fg;
+                        let terminal = cx.new(|cx| TerminalView::new(cx, term_cfg));
+                        // Build the container that will host panels (terminal and future ones).
+                        cx.new(|cx| ContainerView::new(cx, terminal, ui_fg))
+                    },
+                )
+                .unwrap();
 
-        // Capture the container entity to forward keystrokes to the terminal panel.
-        let container = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+            // Capture the container entity to forward keystrokes to the terminal panel.
+            let container = window.update(cx, |_, _, cx| cx.entity()).unwrap();
 
-        cx.observe_keystrokes(move |ev, _window, cx| {
-            if let Some(ch) = ev.keystroke.key_char.clone() {
-                let bytes = ch.to_string().into_bytes();
-                let _ = container.update(cx, |cv, cx| {
-                    cv.terminal.update(cx, |term, _| term.write_bytes(&bytes));
-                    // Request an immediate repaint after sending input
-                    cx.notify();
-                });
-            } else {
-                let name = ev.keystroke.unparse();
-                let seq: Option<&[u8]> = match name.as_str() {
-                    "enter" => Some(b"\r\n"), // send CRLF for immediate command submission on some shells
-                    "backspace" => Some(b"\x7f"),
-                    "left" => Some(b"\x1b[D"),
-                    "right" => Some(b"\x1b[C"),
-                    "up" => Some(b"\x1b[A"),
-                    "down" => Some(b"\x1b[B"),
-                    _ => None,
-                };
-                if let Some(bytes) = seq {
+            cx.observe_keystrokes(move |ev, _window, cx| {
+                if let Some(ch) = ev.keystroke.key_char.clone() {
+                    let bytes = ch.to_string().into_bytes();
                     let _ = container.update(cx, |cv, cx| {
-                        cv.terminal.update(cx, |term, _| term.write_bytes(bytes));
+                        cv.terminal.update(cx, |term, _| term.write_bytes(&bytes));
+                        // Request an immediate repaint after sending input
                         cx.notify();
                     });
+                } else {
+                    let name = ev.keystroke.unparse();
+                    let seq: Option<&[u8]> = match name.as_str() {
+                        "enter" => Some(b"\r\n"), // send CRLF for immediate command submission on some shells
+                        "backspace" => Some(b"\x7f"),
+                        "left" => Some(b"\x1b[D"),
+                        "right" => Some(b"\x1b[C"),
+                        "up" => Some(b"\x1b[A"),
+                        "down" => Some(b"\x1b[B"),
+                        _ => None,
+                    };
+                    if let Some(bytes) = seq {
+                        let _ = container.update(cx, |cv, cx| {
+                            cv.terminal.update(cx, |term, _| term.write_bytes(bytes));
+                            cx.notify();
+                        });
+                    }
                 }
-            }
-        })
-        .detach();
+            })
+            .detach();
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
