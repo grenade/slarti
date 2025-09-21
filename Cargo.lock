@@ -4962,11 +4962,20 @@ dependencies = [
  "gpui",
  "serde",
  "serde_json",
+ "slarti-host",
  "slarti-hosts",
  "slarti-sshcfg",
  "slarti-term",
  "slarti-ui",
  "tokio",
+]
+
+[[package]]
+name = "slarti-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@ use gpui::{
     div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
     MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Window, WindowBounds, WindowOptions,
 };
+use slarti_host::{make_host_panel, HostPanel as HostInfoPanel, HostPanelProps as HostInfoProps};
 use slarti_hosts::{make_hosts_panel, HostsPanel, HostsPanelProps};
 use slarti_sshcfg as sshcfg;
 use slarti_ui::{FsAssets, Vector as UiVector};
@@ -28,6 +29,7 @@ struct ContainerView {
     // Panels
     terminal: gpui::Entity<TerminalView>,
     hosts: gpui::Entity<HostsPanel>,
+    host_info: gpui::Entity<HostInfoPanel>,
     terminal_collapsed: bool,
     ui_fg: (f32, f32, f32, f32),
     // Window state for custom titlebar behavior
@@ -41,12 +43,14 @@ impl ContainerView {
         cx: &mut Context<Self>,
         terminal: gpui::Entity<TerminalView>,
         hosts: gpui::Entity<HostsPanel>,
+        host_info: gpui::Entity<HostInfoPanel>,
         ui_fg: (f32, f32, f32, f32),
     ) -> Self {
         Self {
             focus: cx.focus_handle(),
             terminal,
             hosts,
+            host_info,
             terminal_collapsed: false,
             ui_fg,
             dragging_window: false,
@@ -283,7 +287,22 @@ impl gpui::Render for ContainerView {
                 .flex()
                 .flex_col()
                 .size_full()
-                .when(!self.terminal_collapsed, |d| d.child(self.terminal.clone()));
+                // Top half: host observability panel (placeholder content for now)
+                .child(
+                    div()
+                        .h(px(260.0))
+                        .border_b_1()
+                        .border_color(chrome_border)
+                        .child(self.host_info.clone()),
+                )
+                // Bottom half: terminal fills remaining space
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .when(!self.terminal_collapsed, |d| d.child(self.terminal.clone())),
+                );
 
             let right = div()
                 .flex()
@@ -474,8 +493,12 @@ fn main() {
                             on_select: on_select.clone(),
                         }));
 
-                        // Build the container that will host panels (hosts + terminal).
-                        cx.new(|cx| ContainerView::new(cx, terminal, hosts, ui_fg))
+                        // Build the host info panel (top half of right column).
+                        let host_info = cx.new(make_host_panel(HostInfoProps {
+                            selected_alias: None,
+                        }));
+                        // Build the container that will host panels (hosts + host_info + terminal).
+                        cx.new(|cx| ContainerView::new(cx, terminal, hosts, host_info, ui_fg))
                     },
                 )
                 .unwrap();

@@ -1,0 +1,13 @@
+[package]
+name = "slarti-host"
+version = "0.1.0"
+edition = "2021"
+description = "Host observability panel for Slarti (placeholder UI for future metrics and insights)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gpui = { workspace = true }
+anyhow = { workspace = true }
