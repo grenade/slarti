@@ -737,6 +737,9 @@ fn main() {
                                             .build()
                                             .map(|rt| {
                                                 rt.block_on(async {
+                                                    // NOTE: rsync/scp deployment will respect your SSH config (including ProxyJump)
+                                                    // because we invoke the system ssh/rsync binaries and inherit environment.
+                                                    // Increase SSH operation timeout for slower or multi-hop (ProxyJump) connections.
                                                     let timeout = Duration::from_secs(3);
 
                                                     // Decide remote install path based on remote user (root vs non-root).
@@ -844,9 +847,19 @@ fn main() {
                                                         }
                                                         Err(e) => {
                                                             eprintln!(
-                                                                "agent check failed for {}: {}",
+                                                                "agent check failed for {} (ssh reachable interactively?): {}. \
+    Hint: we inherit your SSH config (including ProxyJump); if this keeps timing out, try increasing the app's SSH timeout.",
                                                                 target, e
                                                             );
+                                                            // Surface error to HostPanel immediately
+                                                            let msg = format!("error: {}", e);
+                                                            let _ = acx.update(|_window, cx| {
+                                                                let _ = host_handle.update(cx, |panel, cx| {
+                                                                    panel.set_status(msg.clone(), cx);
+                                                                    panel.push_progress("check failed", cx);
+                                                                    panel.set_checking(false, cx);
+                                                                });
+                                                            });
                                                         }
                                                     }
 

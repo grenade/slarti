@@ -188,8 +188,25 @@ pub struct HelloAck {
 pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Result<AgentStatus> {
     let needs_shell = remote_path.contains('~') || remote_path.contains('$');
 
+    let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
     let mut cmd = TokioCommand::new("ssh");
-    cmd.arg("-T").arg(target).arg("--");
+    cmd.envs(std::env::vars()); // inherit environment to respect user SSH config (SSH_AUTH_SOCK, etc.)
+                                // Optional verbose debugging when SLARTI_SSH_DEBUG is set
+    let verbose = std::env::var("SLARTI_SSH_DEBUG").is_ok();
+    if verbose {
+        cmd.arg("-vvv");
+    }
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(&connect_timeout)
+        .arg("-o")
+        .arg("Compression=yes")
+        .arg("-T")
+        .arg(target)
+        .arg("--");
     if needs_shell {
         // Use a shell so $HOME / ~ expansion works on remote
         cmd.arg("sh")
@@ -206,6 +223,17 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         .await
         .map_err(|_| anyhow!("ssh check timed out after {:?}", dur))?
         .context("failed to run ssh")?;
+    if !out.status.success() {
+        // Surface stderr to aid diagnosis
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return Err(anyhow!(
+            "ssh check failed (status={}): stderr=`{}`, stdout=`{}`",
+            out.status,
+            stderr.trim(),
+            stdout.trim()
+        ));
+    }
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -236,7 +264,23 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
     let needs_shell = remote_path.contains('~') || remote_path.contains('$');
 
     let mut cmd = TokioCommand::new("ssh");
-    cmd.arg("-T").arg(target).arg("--");
+    cmd.envs(std::env::vars());
+    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
+    let verbose = std::env::var("SLARTI_SSH_DEBUG").is_ok();
+    if verbose {
+        cmd.arg("-vvv");
+    }
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg("-o")
+        .arg("Compression=yes")
+        .arg("-T")
+        .arg(target)
+        .arg("--");
     if needs_shell {
         // Use a shell so $HOME / ~ expansion works on remote
         cmd.arg("sh")
@@ -273,8 +317,23 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
 /// Determine if the remote user is root by querying `id -u` over SSH.
 /// Returns true if the UID is 0.
 pub async fn remote_user_is_root(target: &str, dur: Duration) -> Result<bool> {
+    let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
     let mut cmd = TokioCommand::new("ssh");
-    cmd.arg("-T")
+    cmd.envs(std::env::vars());
+    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
+    let verbose = std::env::var("SLARTI_SSH_DEBUG").is_ok();
+    if verbose {
+        cmd.arg("-vvv");
+    }
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(&connect_timeout)
+        .arg("-o")
+        .arg("Compression=yes")
+        .arg("-T")
         .arg(target)
         .arg("--")
         .arg("sh")
@@ -378,8 +437,22 @@ pub async fn deploy_agent(
         tmp = tmp_path
     );
 
+    let connect_timeout = format!("ConnectTimeout={}", timeout.as_secs());
     let mut ssh_install = TokioCommand::new("ssh");
+    ssh_install.envs(std::env::vars());
+    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
+    if std::env::var("SLARTI_SSH_DEBUG").is_ok() {
+        ssh_install.arg("-vvv");
+    }
     ssh_install
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(&connect_timeout)
+        .arg("-o")
+        .arg("Compression=yes")
         .arg("-T")
         .arg(target)
         .arg("--")
