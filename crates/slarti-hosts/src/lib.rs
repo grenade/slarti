@@ -11,8 +11,8 @@ pub struct HostsPanelProps {
     /// Parsed SSH configuration tree (typically loaded from ~/.ssh/config).
     pub tree: ConfigTree,
     /// Callback invoked when a concrete host alias is selected.
-    /// The argument is the selected alias string.
-    pub on_select: Arc<dyn Fn(String) + Send + Sync>,
+    /// Parameters: (alias, &mut Window, &mut Context<HostsPanel>)
+    pub on_select: Arc<dyn Fn(String, &mut Window, &mut Context<HostsPanel>) + Send + Sync>,
 }
 
 /// Renders an expandable tree of SSH hosts from an SSH config.
@@ -22,7 +22,7 @@ pub struct HostsPanelProps {
 pub struct HostsPanel {
     focus: FocusHandle,
     tree: ConfigTree,
-    on_select: Arc<dyn Fn(String) + Send + Sync>,
+    on_select: Arc<dyn Fn(String, &mut Window, &mut Context<HostsPanel>) + Send + Sync>,
     // In a follow-up pass we can persist/restore expansion state by keying these with canonical paths.
     expanded_groups: std::collections::HashSet<String>,
 }
@@ -66,7 +66,7 @@ impl HostsPanel {
         _cx: &mut Context<Self>,
         alias: String,
     ) {
-        (self.on_select)(alias);
+        (self.on_select)(alias, _window, _cx);
     }
 
     fn render_tree(

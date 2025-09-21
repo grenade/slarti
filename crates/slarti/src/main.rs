@@ -475,10 +475,22 @@ fn main() {
                         let ui_fg = term_cfg.theme.fg;
                         let terminal = cx.new(|cx| TerminalView::new(cx, term_cfg));
 
+                        // Build the host info panel (top half of right column).
+                        let host_info = cx.new(make_host_panel(HostInfoProps {
+                            selected_alias: None,
+                        }));
+
                         // Build the hosts panel from parsed SSH config.
-                        let on_select = Arc::new(|_alias: String| {
-                            // TODO: in a follow-up, start an ssh session to the selected host.
-                        });
+                        let host_info_handle = host_info.clone();
+                        let on_select = Arc::new(
+                            move |alias: String,
+                                  _window: &mut Window,
+                                  hosts_cx: &mut Context<HostsPanel>| {
+                                let _ = host_info_handle.update(hosts_cx, |panel, cx| {
+                                    panel.set_selected_host(Some(alias.clone()), cx);
+                                });
+                            },
+                        );
                         let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {
                             sshcfg::model::ConfigTree {
                                 root: sshcfg::model::FileNode {
@@ -491,11 +503,6 @@ fn main() {
                         let hosts = cx.new(make_hosts_panel(HostsPanelProps {
                             tree: cfg_tree,
                             on_select: on_select.clone(),
-                        }));
-
-                        // Build the host info panel (top half of right column).
-                        let host_info = cx.new(make_host_panel(HostInfoProps {
-                            selected_alias: None,
                         }));
                         // Build the container that will host panels (hosts + host_info + terminal).
                         cx.new(|cx| ContainerView::new(cx, terminal, hosts, host_info, ui_fg))
