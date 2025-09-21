@@ -1,102 +1,70 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::Parser;
-use slarti_proto::{Command as CommandMsg, Response};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use slarti_proto::{Command, Response};
+use slarti_ssh::{check_agent, run_agent};
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 struct Args {
     /// SSH target, e.g. user@host
     target: String,
-    /// Remote agent command
+    /// Remote agent path on target host
     #[arg(long, default_value = "./slarti-remote")]
     agent: String,
+    /// Timeout (seconds) for checks and handshake
+    #[arg(long, default_value_t = 3u64)]
+    timeout: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let timeout = Duration::from_secs(args.timeout);
 
-    let mut child = Command::new("ssh")
-        .arg("-T")
-        .arg(&args.target)
-        .arg("--")
-        .arg(&args.agent)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
+    // 1) Check agent presence/version
+    let status = check_agent(&args.target, &args.agent, timeout).await?;
+    println!(
+        "check_agent: present={}, can_run={}, version={:?}",
+        status.present, status.can_run, status.version
+    );
 
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-    let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    // 2) Run agent and perform Hello/HelloAck handshake
+    let mut client = run_agent(&args.target, &args.agent).await?;
+    let hello = client
+        .hello(env!("CARGO_PKG_VERSION"), Some(timeout))
+        .await?;
+    println!(
+        "HELLO: agent_version={}, capabilities={:?}",
+        hello.agent_version, hello.capabilities
+    );
 
-    // 1) Hello handshake
-    let hello = CommandMsg::Hello {
-        id: 1,
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    let line = serde_json::to_string(&hello)? + "\n";
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.flush().await?;
-
-    // Read HelloAck
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 8192];
-    loop {
-        let n = stdout.read(&mut tmp).await?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&tmp[..n]);
-        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            let line = String::from_utf8_lossy(&buf[..pos]).into_owned();
-            match serde_json::from_str::<Response>(&line) {
-                Ok(Response::HelloAck {
-                    id: _,
-                    agent_version,
-                    capabilities,
-                }) => {
-                    println!(
-                        "HELLO: agent_version={}, capabilities={:?}",
-                        agent_version, capabilities
-                    );
-                }
-                Ok(other) => {
-                    println!("Unexpected response to Hello: {:?}", other);
-                }
-                Err(e) => {
-                    println!("Failed to parse HelloAck: {}", e);
-                }
-            }
-            break;
-        }
-    }
-
-    // 2) Sample command after handshake
-    let req = CommandMsg::ListDir {
+    // 3) Sample command after handshake: ListDir ~/ (first 200 entries)
+    let req = Command::ListDir {
         id: 2,
         path: "~/".into(),
         max: Some(200),
         skip: Some(0),
     };
-    let line = serde_json::to_string(&req)? + "\n";
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.flush().await?;
-
-    // Read one line of JSON response for ListDir
-    let mut buf2 = Vec::new();
-    let mut tmp2 = [0u8; 8192];
-    loop {
-        let n = stdout.read(&mut tmp2).await?;
-        if n == 0 {
-            break;
+    client.send_command(&req).await?;
+    match client.read_response_line().await? {
+        Response::ListDirOk { id, entries, eof } => {
+            println!("ListDirOk id={} entries={} eof={}", id, entries.len(), eof);
+            for e in entries.iter().take(10) {
+                println!(
+                    "{}\t{}\t{}",
+                    if e.is_dir { "DIR " } else { "FILE" },
+                    e.name,
+                    e.path
+                );
+            }
+            if entries.len() > 10 {
+                println!("... (showing first 10)");
+            }
         }
-        buf2.extend_from_slice(&tmp2[..n]);
-        if let Some(pos) = buf2.iter().position(|&b| b == b'\n') {
-            let line = String::from_utf8_lossy(&buf2[..pos]).into_owned();
-            println!("RESPONSE: {}", line);
-            break;
+        other => {
+            println!("Unexpected response: {:?}", other);
         }
     }
+
     Ok(())
 }

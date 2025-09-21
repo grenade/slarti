@@ -8,6 +8,11 @@ const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Print agent version and exit if requested.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("{}", AGENT_VERSION);
+        return Ok(());
+    }
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin).lines();
