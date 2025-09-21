@@ -55,25 +55,14 @@ impl ContainerView {
         window.remove_window();
     }
 
-    fn on_minimize(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        // Minimize by hiding the application; a timer or menu can re-activate later.
-        cx.hide();
+    fn on_minimize(&mut self, _: &MouseUpEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        // Minimize using the platform window control.
+        window.minimize_window();
     }
 
-    fn on_maximize(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // Coarse maximize/restore: save current bounds and resize to a centered large bounds
-        if self.is_maximized {
-            if let Some(bounds) = self.saved_windowed_bounds.take() {
-                window.resize(bounds.size);
-            }
-            self.is_maximized = false;
-        } else {
-            let current = window.bounds();
-            self.saved_windowed_bounds = Some(current);
-            let target = Bounds::centered(None, current.size, cx);
-            window.resize(target.size);
-            self.is_maximized = true;
-        }
+    fn on_maximize(&mut self, _: &MouseUpEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        // Toggle platform zoom/maximize.
+        window.zoom_window();
     }
     // Custom titlebar drag-to-move (Wayland-friendly)
     fn on_titlebar_mouse_down(
@@ -211,6 +200,7 @@ impl gpui::Render for ContainerView {
                                     .border_1()
                                     .border_color(gpui::yellow())
                             })
+                            .window_control_area(gpui::WindowControlArea::Min)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_minimize))
                             .child(
@@ -228,6 +218,7 @@ impl gpui::Render for ContainerView {
                                     .border_1()
                                     .border_color(gpui::yellow())
                             })
+                            .window_control_area(gpui::WindowControlArea::Max)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_maximize))
                             .child(
@@ -245,6 +236,7 @@ impl gpui::Render for ContainerView {
                                     .border_1()
                                     .border_color(gpui::yellow())
                             })
+                            .window_control_area(gpui::WindowControlArea::Close)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_close))
                             .child(
