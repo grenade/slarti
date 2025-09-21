@@ -5,6 +5,7 @@ members = [
     "crates/slarti-remote",
     "crates/slarti-ssh",
     "crates/slarti-proto",
+    "crates/slarti-ui",
 ]
 resolver = "2"
 
@@ -23,3 +24,4 @@ dirs-next = "2"
 portable-pty = "0.8"
 gpui = { git = "https://github.com/zed-industries/zed" }
 alacritty_terminal = { git = "https://github.com/alacritty/alacritty", package = "alacritty_terminal" }
+slarti-ui = { path = "crates/slarti-ui" }

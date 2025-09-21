@@ -1,0 +1,17 @@
+[package]
+name = "slarti-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Shared UI components for Slarti (e.g. Vector SVG wrapper and re-exports)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+gpui = { workspace = true }
+serde = { workspace = true, optional = true }

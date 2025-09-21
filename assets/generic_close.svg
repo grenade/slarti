@@ -1,4 +1,15 @@
 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M11.5 4.5L4.5 11.5" stroke="black" stroke-linecap="square" stroke-linejoin="round"/>
-    <path d="M4.5 4.5L11.5 11.5" stroke="black" stroke-linecap="square" stroke-linejoin="round"/>
+  <!-- Filled close (X) icon using currentColor, no strokes -->
+  <path fill="currentColor" d="
+    M4.707 3.293
+    L12.707 11.293
+    L11.293 12.707
+    L3.293 4.707
+    Z
+    M12.707 4.707
+    L4.707 12.707
+    L3.293 11.293
+    L11.293 3.293
+    Z
+  "/>
 </svg>

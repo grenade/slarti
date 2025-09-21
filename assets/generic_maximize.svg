@@ -1,3 +1,5 @@
 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M11.5 4.5H4.5V11.5H11.5V4.5Z" stroke="black"/>
+  <!-- Filled outline (ring) using currentColor to ensure tinting works without relying on stroke -->
+  <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"
+        d="M3 3H13V13H3V3ZM4.5 4.5V11.5H11.5V4.5H4.5Z"/>
 </svg>

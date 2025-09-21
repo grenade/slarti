@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 gpui = { workspace = true }
 slarti-term = { path = "../slarti-term" }
+slarti-ui = { path = "../slarti-ui" }

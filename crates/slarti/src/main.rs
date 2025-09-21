@@ -1,8 +1,22 @@
 use gpui::{
     div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Size, Window, WindowBounds, WindowOptions,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Window, WindowBounds, WindowOptions,
 };
+use slarti_ui::Vector as UiVector;
 
+/// Minimal Vector wrapper around gpui::svg() to support Vector::color() like Zed.
+///
+/// Usage:
+/// Vector::new("assets/icon.svg", px(14.0))
+///     .color(gpui::hsla(...))
+///     .render()
+
+/// Minimal Vector wrapper around gpui::svg() to support Vector::color(...).render() like Zed.
+///
+/// Usage:
+/// Vector::new("assets/icon.svg", px(14.0))
+///     .color(gpui::hsla(...))
+///     .render()
 // Terminal panel from the slarti-term crate
 use slarti_term::{TerminalConfig, TerminalView};
 
@@ -11,6 +25,7 @@ struct ContainerView {
     // Panels
     terminal: gpui::Entity<TerminalView>,
     terminal_collapsed: bool,
+    ui_fg: (f32, f32, f32, f32),
     // Window state for custom titlebar behavior
     dragging_window: bool,
     saved_windowed_bounds: Option<Bounds<Pixels>>,
@@ -18,11 +33,16 @@ struct ContainerView {
 }
 
 impl ContainerView {
-    fn new(cx: &mut Context<Self>, terminal: gpui::Entity<TerminalView>) -> Self {
+    fn new(
+        cx: &mut Context<Self>,
+        terminal: gpui::Entity<TerminalView>,
+        ui_fg: (f32, f32, f32, f32),
+    ) -> Self {
         Self {
             focus: cx.focus_handle(),
             terminal,
             terminal_collapsed: false,
+            ui_fg,
             dragging_window: false,
             saved_windowed_bounds: None,
             is_maximized: false,
@@ -135,7 +155,7 @@ impl gpui::Render for ContainerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title_bar_bg = gpui::rgb(0x141414);
         let chrome_border = gpui::opaque_grey(0.2, 0.7);
-        let text_color = gpui::white();
+        let text_color = gpui::hsla(self.ui_fg.0, self.ui_fg.1, self.ui_fg.2, self.ui_fg.3);
 
         // Header: custom titlebar with drag-to-move and icon buttons
         let header = div()
@@ -178,28 +198,40 @@ impl gpui::Render for ContainerView {
                     .flex()
                     .gap_3()
                     .child(
-                        svg()
-                            .path("assets/generic_minimize.svg")
+                        div()
                             .size(px(14.0))
-                            .text_color(text_color)
                             .cursor_pointer()
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_minimize)),
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_minimize))
+                            .child(
+                                UiVector::new("assets/generic_minimize.svg")
+                                    .square(px(14.0))
+                                    .color(text_color)
+                                    .render(),
+                            ),
                     )
                     .child(
-                        svg()
-                            .path("assets/generic_maximize.svg")
+                        div()
                             .size(px(14.0))
-                            .text_color(text_color)
                             .cursor_pointer()
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_maximize)),
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_maximize))
+                            .child(
+                                UiVector::new("assets/generic_maximize.svg")
+                                    .square(px(14.0))
+                                    .color(text_color)
+                                    .render(),
+                            ),
                     )
                     .child(
-                        svg()
-                            .path("assets/generic_close.svg")
+                        div()
                             .size(px(14.0))
-                            .text_color(text_color)
                             .cursor_pointer()
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_close)),
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_close))
+                            .child(
+                                UiVector::new("assets/generic_close.svg")
+                                    .square(px(14.0))
+                                    .color(text_color)
+                                    .render(),
+                            ),
                     ),
             );
 
@@ -234,12 +266,16 @@ impl gpui::Render for ContainerView {
                 .border_t_1()
                 .border_color(chrome_border)
                 .child(
-                    svg()
-                        .path("assets/terminal.svg")
+                    div()
                         .size(px(16.0))
-                        .text_color(text_color)
                         .cursor_pointer()
-                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal)),
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal))
+                        .child(
+                            UiVector::new("assets/terminal.svg")
+                                .square(px(16.0))
+                                .color(text_color)
+                                .render(),
+                        ),
                 )
         };
 
@@ -354,9 +390,11 @@ fn main() {
                 },
                 |_, cx| {
                     // Build the terminal panel from slarti-term.
-                    let terminal = cx.new(|cx| TerminalView::new(cx, TerminalConfig::default()));
+                    let term_cfg = TerminalConfig::default();
+                    let ui_fg = term_cfg.theme.fg;
+                    let terminal = cx.new(|cx| TerminalView::new(cx, term_cfg));
                     // Build the container that will host panels (terminal and future ones).
-                    cx.new(|cx| ContainerView::new(cx, terminal))
+                    cx.new(|cx| ContainerView::new(cx, terminal, ui_fg))
                 },
             )
             .unwrap();

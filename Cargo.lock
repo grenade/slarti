@@ -4954,6 +4954,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slarti-term",
+ "slarti-ui",
  "tokio",
 ]
 
@@ -5002,6 +5003,14 @@ dependencies = [
  "anyhow",
  "gpui",
  "portable-pty",
+]
+
+[[package]]
+name = "slarti-ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "serde",
 ]
 
 [[package]]
