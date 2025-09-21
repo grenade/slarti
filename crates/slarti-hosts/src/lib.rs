@@ -201,8 +201,6 @@ fn render_group_block(
             .h(px(24.0))
             .pl(pad)
             .pr(px(8.0))
-            .border_b_1()
-            .border_color(border)
             .text_color(fg)
             .cursor_pointer()
             .on_mouse_up(
@@ -237,7 +235,7 @@ fn render_group_block(
                         .flex()
                         .items_center()
                         .h(px(22.0))
-                        .pl(px((depth as f32 + 1.0) * 16.0))
+                        .pl(px((depth as f32 + 1.0) * 24.0))
                         .pr(px(8.0))
                         .text_color(gpui::opaque_grey(1.0, 0.95))
                         .cursor_pointer()
@@ -274,7 +272,12 @@ fn render_group_block(
         }
     }
 
-    div().flex().flex_col().children(items)
+    div()
+        .flex()
+        .flex_col()
+        .border_b_1()
+        .border_color(border)
+        .children(items)
 }
 
 // -------------
