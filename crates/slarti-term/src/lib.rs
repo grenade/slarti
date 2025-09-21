@@ -20,6 +20,37 @@ use alacritty_terminal::{
     vte::ansi::Processor,
 };
 
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let l = (max + min) / 2.0;
+
+    if max == min {
+        return (0.0, 0.0, l);
+    }
+
+    let d = max - min;
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+
+    let mut h = if max == rf {
+        ((gf - bf) / d) % 6.0
+    } else if max == gf {
+        (bf - rf) / d + 2.0
+    } else {
+        (rf - gf) / d + 4.0
+    } * 60.0;
+
+    if h < 0.0 {
+        h += 360.0;
+    }
+
+    (h / 360.0, s, l)
+}
+
 /// Theme colors for the terminal panel.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
@@ -493,61 +524,161 @@ impl Element for TerminalCanvasElement {
             self.theme.fg.3,
         );
 
-        // Paint lines
+        // Paint lines with damage-aware shaping and palette-based colors
         let mut origin = bounds.origin;
         // Track pixel-accurate cursor placement using shaped metrics
         let mut cursor_px: Option<f32> = None;
         let mut cursor_py: Option<f32> = None;
-        for y in 0..rows {
-            // Build plain text for the line
-            let line_text = if let Ok(eng) = self.engine.lock() {
-                let mut s = String::with_capacity(cols);
-                for x in 0..cols {
-                    let ch = eng.term.grid()[Line(y as i32)][Column(x)].c;
-                    s.push(ch);
-                }
-                s
-            } else {
-                String::new()
-            };
 
-            // Compute cursor byte index before shaping to avoid moving line_text
-            let byte_idx_opt = if y == cursor_line {
-                let mut idx = 0usize;
-                for (xi, ch) in line_text.chars().enumerate() {
-                    if xi >= cursor_col {
-                        break;
+        // Resolve terminal palette and helper to convert to gpui color
+        // Use the same concrete color type as `fg` by returning the expression directly.
+        let to_color = |rgb: Option<alacritty_terminal::vte::ansi::Rgb>| match rgb {
+            Some(c) => {
+                let (h, s, l) = rgb_to_hsl(c.r, c.g, c.b);
+                gpui::hsla(h, s, l, 1.0)
+            }
+            None => fg,
+        };
+
+        // Lock engine once to compute damage and palette
+        let (rows_to_shape, palette, rows_count, cols_count, cursor_point) =
+            if let Ok(mut eng) = self.engine.lock() {
+                let rows_count = eng.term.screen_lines();
+                let cols_count = eng.term.columns();
+
+                // Build damage map
+                let mut damage = vec![false; rows_count];
+                match eng.term.damage() {
+                    alacritty_terminal::term::TermDamage::Full => {
+                        for r in 0..rows_count {
+                            damage[r] = true;
+                        }
                     }
-                    idx += ch.len_utf8();
+                    alacritty_terminal::term::TermDamage::Partial(mut it) => {
+                        while let Some(line) = it.next() {
+                            if line.line < rows_count {
+                                damage[line.line] = true;
+                            }
+                        }
+                    }
                 }
-                Some(idx)
+
+                // Ensure cache presence
+                for r in 0..rows_count {
+                    if self.cache.get(r).and_then(|o| o.as_ref()).is_none() {
+                        damage[r] = true;
+                    }
+                }
+
+                // Snapshot palette and cursor
+                let pal = eng.term.colors().clone();
+                let cur = eng.term.grid().cursor.point;
+
+                // Reset damage now that we've captured it
+                eng.term.reset_damage();
+
+                (damage, pal, rows_count, cols_count, cur)
             } else {
-                None
+                return;
             };
 
-            // Shape the line with explicit theme foreground color
-            let shaped = window.text_system().shape_line(
-                SharedString::from(line_text),
-                font_size,
-                &[TextRun {
-                    len: cols,
-                    font: window.text_style().font(),
-                    color: fg,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
+        for y in 0..rows_count {
+            // Build text and color runs if damaged, otherwise paint from cache
+            if rows_to_shape.get(y).copied().unwrap_or(false) {
+                // Collect line text and simple foreground color per cell (merge runs)
+                let mut line_text = String::with_capacity(cols_count);
+                let mut runs: Vec<TextRun> = Vec::new();
+                let mut run_len = 0usize;
+                let mut run_color = fg;
 
-            // If this is the cursor line, compute pixel x from shaped metrics
-            if let Some(byte_idx) = byte_idx_opt {
-                let rel_x = shaped.x_for_index(byte_idx).0;
-                cursor_px = Some(bounds.left().0 + rel_x);
-                cursor_py = Some(origin.y.0);
+                if let Ok(eng) = self.engine.lock() {
+                    for x in 0..cols_count {
+                        let cell = &eng.term.grid()[Line(y as i32)][Column(x)];
+                        let ch = cell.c;
+                        line_text.push(ch);
+
+                        // Resolve fg color: prefer Spec/Named/Indexed mapping, fallback to theme fg
+                        let fg_resolved = match cell.fg {
+                            alacritty_terminal::vte::ansi::Color::Spec(rgb) => to_color(Some(rgb)),
+                            alacritty_terminal::vte::ansi::Color::Named(named) => {
+                                to_color(palette[named])
+                            }
+                            alacritty_terminal::vte::ansi::Color::Indexed(i) => {
+                                to_color(palette[i as usize])
+                            }
+                            _ => fg,
+                        };
+
+                        // Merge color runs
+                        if run_len == 0 {
+                            run_color = fg_resolved;
+                            run_len = ch.len_utf8();
+                        } else if fg_resolved == run_color {
+                            run_len += ch.len_utf8();
+                        } else {
+                            runs.push(TextRun {
+                                len: run_len,
+                                font: window.text_style().font(),
+                                color: run_color,
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            });
+                            run_color = fg_resolved;
+                            run_len = ch.len_utf8();
+                        }
+                    }
+                }
+
+                // Flush last run
+                if run_len > 0 {
+                    runs.push(TextRun {
+                        len: run_len,
+                        font: window.text_style().font(),
+                        color: run_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    });
+                }
+
+                // Shape the line with color runs
+                let shaped = window.text_system().shape_line(
+                    SharedString::from(line_text),
+                    font_size,
+                    &runs,
+                    None,
+                );
+
+                // Update cursor position if on this row
+                if y == cursor_point.line.0.max(0) as usize {
+                    // Compute byte index by summing run lengths up to the cursor column
+                    // (each run.len is in bytes by construction above)
+                    let mut byte_idx = 0usize;
+                    if let Ok(eng) = self.engine.lock() {
+                        for x in 0..cursor_point.column.0 {
+                            let ch = eng.term.grid()[Line(y as i32)][Column(x)].c;
+                            byte_idx += ch.len_utf8();
+                        }
+                    }
+                    let rel_x = shaped.x_for_index(byte_idx).0;
+                    cursor_px = Some(bounds.left().0 + rel_x);
+                    cursor_py = Some(origin.y.0);
+                }
+
+                // Cache shaped line
+                if y < self.cache.len() {
+                    self.cache[y] = Some(shaped);
+                }
             }
 
-            let _ = shaped.paint(origin, window.line_height(), window, cx);
+            // Paint from cache
+            if let Some(slot) = self.cache.get_mut(y) {
+                if let Some(mut shaped) = slot.take() {
+                    let _ = shaped.paint(origin, window.line_height(), window, cx);
+                    *slot = Some(shaped);
+                }
+            }
 
             origin.y += gpui::px(self.cell_h);
             if origin.y > bounds.bottom() {
@@ -559,9 +690,12 @@ impl Element for TerminalCanvasElement {
         let (cursor_x, cursor_y) = if let (Some(px), Some(py)) = (cursor_px, cursor_py) {
             (px, py)
         } else {
+            // Fallback to cell metrics if shaped position wasn't computed
+            let y = cursor_point.line.0.max(0) as usize;
+            let x = cursor_point.column.0;
             (
-                bounds.left().0 + cursor_col as f32 * self.cell_w,
-                bounds.top().0 + cursor_line as f32 * self.cell_h,
+                bounds.left().0 + x as f32 * self.cell_w,
+                bounds.top().0 + y as f32 * self.cell_h,
             )
         };
         let cursor_bounds = Bounds::new(
