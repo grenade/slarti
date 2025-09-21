@@ -451,7 +451,7 @@ fn main() {
                 } else {
                     let name = ev.keystroke.unparse();
                     let seq: Option<&[u8]> = match name.as_str() {
-                        "enter" => Some(b"\r\n"), // send CRLF for immediate command submission on some shells
+                        "enter" => Some(b"\r"), // normalize to CR to avoid extra blank prompts across shells
                         "backspace" => Some(b"\x7f"),
                         "left" => Some(b"\x1b[D"),
                         "right" => Some(b"\x1b[C"),

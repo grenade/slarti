@@ -317,9 +317,19 @@ impl Focusable for TerminalView {
 }
 
 impl gpui::Render for TerminalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Drain any pending bytes and request repaint if terminal advanced.
-        if self.drain_and_advance() {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Drain pending PTY bytes quickly; if progress was made, keep animating until idle.
+        let mut progressed = false;
+        for _ in 0..8 {
+            if self.drain_and_advance() {
+                progressed = true;
+            } else {
+                break;
+            }
+        }
+        if progressed {
+            // Ensure another frame is produced promptly while data continues to arrive.
+            window.request_animation_frame();
             cx.notify();
         }
 
