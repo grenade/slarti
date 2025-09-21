@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Result};
-use slarti_proto::{Command, DirEntry, Response};
+use slarti_proto::{Capability, Command, DirEntry, Response};
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,6 +39,21 @@ async fn main() -> Result<()> {
 
 async fn handle_command(cmd: Command) -> Result<Response> {
     match cmd {
+        Command::Hello {
+            id,
+            client_version: _,
+        } => Ok(Response::HelloAck {
+            id,
+            agent_version: AGENT_VERSION.to_string(),
+            capabilities: vec![
+                Capability::SysInfo,
+                Capability::StaticConfig,
+                Capability::ServicesList,
+                Capability::ContainersList,
+                Capability::NetListeners,
+                Capability::ProcessesSummary,
+            ],
+        }),
         Command::ListDir {
             id,
             path,
