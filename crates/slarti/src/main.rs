@@ -1,6 +1,7 @@
 use gpui::{
     div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Window, WindowBounds, WindowOptions,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window, WindowBounds,
+    WindowOptions,
 };
 use serde::{Deserialize, Serialize};
 use slarti_host::{make_host_panel, HostPanel as HostInfoPanel, HostPanelProps as HostInfoProps};
@@ -12,6 +13,45 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Persisted UI settings
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct UiSettings {
+    /// Right column split top height in pixels
+    split_top: f32,
+    /// Last window bounds (windowed)
+    last_window_bounds: Option<(i32, i32, u32, u32)>, // x, y, w, h
+}
+
+fn ui_settings_path() -> std::path::PathBuf {
+    let mut dir = slarti_state_dir();
+    dir.push("ui");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.push("settings.json");
+    dir
+}
+
+fn load_ui_settings() -> UiSettings {
+    let path = ui_settings_path();
+    if let Ok(s) = std::fs::read_to_string(path) {
+        if let Ok(cfg) = serde_json::from_str::<UiSettings>(&s) {
+            return cfg;
+        }
+    }
+    UiSettings {
+        split_top: 240.0,
+        last_window_bounds: None,
+    }
+}
+
+fn save_ui_settings(mut cfg: UiSettings) {
+    // Clamp split_top to sane bounds before saving
+    cfg.split_top = cfg.split_top.clamp(120.0, 600.0);
+    let _ = std::fs::write(
+        ui_settings_path(),
+        serde_json::to_vec_pretty(&cfg).unwrap_or_else(|_| serde_json::to_vec(&cfg).unwrap()),
+    );
+}
 
 /// Persistent agent deployment information for a host alias.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +148,10 @@ struct ContainerView {
     host_info: gpui::Entity<HostInfoPanel>,
     terminal_collapsed: bool,
     ui_fg: (f32, f32, f32, f32),
+    // Split state for right column (top host info vs bottom terminal)
+    split_top: f32,
+    dragging_split: bool,
+    last_split_y: f32,
     // Remote/selection state
     selected_alias: Option<String>,
     agent_status: RemoteAgentStatus,
@@ -132,6 +176,10 @@ impl ContainerView {
             host_info,
             terminal_collapsed: false,
             ui_fg,
+            // load persisted UI settings (split position)
+            split_top: load_ui_settings().split_top,
+            dragging_split: false,
+            last_split_y: 0.0,
             selected_alias: None,
             agent_status: RemoteAgentStatus::Unknown,
             dragging_window: false,
@@ -188,6 +236,51 @@ impl ContainerView {
     ) {
         self.terminal_collapsed = !self.terminal_collapsed;
         cx.notify();
+    }
+
+    // Split drag handlers
+    fn on_split_mouse_down(
+        &mut self,
+        ev: &MouseDownEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.dragging_split = true;
+        self.last_split_y = ev.position.y.0;
+    }
+
+    fn on_split_mouse_up(
+        &mut self,
+        _ev: &MouseUpEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dragging_split {
+            self.dragging_split = false;
+            // persist split position
+            let mut ui = load_ui_settings();
+            ui.split_top = self.split_top;
+            save_ui_settings(ui);
+            cx.notify();
+        }
+    }
+
+    fn on_split_mouse_move(
+        &mut self,
+        ev: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dragging_split {
+            let y = ev.position.y.0;
+            let dy = y - self.last_split_y;
+            self.last_split_y = y;
+            // Adjust split height and clamp to sane bounds
+            let min_h = 120.0f32;
+            let max_h = 600.0f32;
+            self.split_top = (self.split_top + dy).clamp(min_h, max_h);
+            cx.notify();
+        }
     }
 
     fn on_focus_click(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -373,7 +466,7 @@ impl gpui::Render for ContainerView {
                     div()
                         .flex()
                         .flex_col()
-                        .h(px(260.0))
+                        .h(px(self.split_top.clamp(120.0, 600.0)))
                         .border_b_1()
                         .border_color(chrome_border)
                         // Simple remote status header above the Host panel
@@ -385,6 +478,29 @@ impl gpui::Render for ContainerView {
                                 .child("Remote: unknown"),
                         )
                         .child(self.host_info.clone()),
+                )
+                // Draggable split handle between top and bottom
+                .child(
+                    div()
+                        .h(px(6.0))
+                        .cursor_ns_resize()
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_split_mouse_down))
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_split_mouse_up))
+                        .on_mouse_up(MouseButton::Left, {
+                            let top_ref = &mut self.split_top;
+                            cx.listener(
+                                move |this: &mut Self,
+                                      _ev: &MouseUpEvent,
+                                      _w: &mut Window,
+                                      _cx: &mut Context<Self>| {
+                                    let mut ui = load_ui_settings();
+                                    ui.split_top = this.split_top;
+                                    save_ui_settings(ui);
+                                },
+                            )
+                        })
+                        .on_mouse_move(cx.listener(Self::on_split_mouse_move))
+                        .bg(gpui::opaque_grey(0.2, 0.2)),
                 )
                 // Bottom half: terminal fills remaining space
                 .child(
@@ -552,12 +668,19 @@ fn main() {
             ),
         )
         .run(|cx: &mut App| {
-            let bounds = Bounds::centered(None, size(px(1000.0), px(700.0)), cx);
+            // Load last UI settings to restore window bounds if available
+            let ui = load_ui_settings();
+            let default_bounds = Bounds::centered(None, size(px(1000.0), px(700.0)), cx);
+            let restored_bounds = ui.last_window_bounds.as_ref().map(|(x, y, w, h)| Bounds {
+                origin: gpui::point(px(*x as f32), px(*y as f32)),
+                size: gpui::size(px(*w as f32), px(*h as f32)),
+            });
+            let open_bounds = restored_bounds.unwrap_or(default_bounds);
 
             let window = cx
                 .open_window(
                     WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_bounds: Some(WindowBounds::Windowed(open_bounds)),
                         ..Default::default()
                     },
                     |_, cx| {
@@ -580,71 +703,133 @@ fn main() {
                                 // Update the Host panel with the selected alias immediately.
                                 let _ = host_info_handle.update(hosts_cx, |panel, cx| {
                                     panel.set_selected_host(Some(alias.clone()), cx);
+                                    // Make the Host panel instantaneous: show progress immediately.
+                                    panel.set_status("checking", cx);
+                                    panel.set_checking(true, cx);
+                                    panel.clear_progress(cx);
+                                    panel.push_progress("probing agent…", cx);
                                 });
 
                                 // Spawn an async task to check agent presence/version and persist state.
                                 let target = alias.clone();
                                 let version = env!("CARGO_PKG_VERSION").to_string();
+                                let host_handle = host_info_handle.clone();
                                 window
-                                    .spawn(hosts_cx, async move |_app| {
-                                        let timeout = Duration::from_secs(3);
+                                    .spawn(hosts_cx, async move |acx| {
+                                        // Create a dedicated Tokio runtime to run ssh/process IO.
+                                        let _ = tokio::runtime::Builder::new_current_thread()
+                                            .enable_all()
+                                            .build()
+                                            .map(|rt| {
+                                                rt.block_on(async {
+                                                    let timeout = Duration::from_secs(3);
 
-                                        // Decide remote install path based on remote user (root vs non-root).
-                                        let is_root = remote_user_is_root(&target, timeout)
-                                            .await
-                                            .unwrap_or(false);
-                                        let remote_dir = if is_root {
-                                            format!("/usr/local/lib/slarti/agent/{}", version)
-                                        } else {
-                                            format!("$HOME/.local/share/slarti/agent/{}", version)
-                                        };
-                                        let remote_path = format!("{}/slarti-remote", remote_dir);
-
-                                        // Initialize a state record for this host.
-                                        let mut state = AgentDeploymentState {
-                                            alias: target.clone(),
-                                            last_deployed_version: None,
-                                            last_deployed_at: None,
-                                            remote_path: Some(std::path::PathBuf::from(
-                                                remote_path.clone(),
-                                            )),
-                                            remote_checksum: None,
-                                            last_seen_ok: false,
-                                        };
-
-                                        // Check agent presence/version, then attempt a Hello handshake.
-                                        match check_agent(&target, &remote_path, timeout).await {
-                                            Ok(status) if status.present && status.can_run => {
-                                                // Try to connect and perform Hello/HelloAck.
-                                                if let Ok(mut client) =
-                                                    run_agent(&target, &remote_path).await
-                                                {
-                                                    if let Ok(hello) = client
-                                                        .hello(
-                                                            env!("CARGO_PKG_VERSION"),
-                                                            Some(timeout),
+                                                    // Decide remote install path based on remote user (root vs non-root).
+                                                    let is_root =
+                                                        remote_user_is_root(&target, timeout)
+                                                            .await
+                                                            .unwrap_or(false);
+                                                    let remote_dir = if is_root {
+                                                        format!(
+                                                            "/usr/local/lib/slarti/agent/{}",
+                                                            version
                                                         )
-                                                        .await
-                                                    {
-                                                        state.last_deployed_version =
-                                                            Some(hello.agent_version.clone());
-                                                        state.last_seen_ok = true;
-                                                    }
-                                                    let _ = client.terminate().await;
-                                                }
-                                            }
-                                            Ok(_) => {
-                                                // Not present or not runnable; leave last_seen_ok = false and keep path for future deploy.
-                                            }
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "agent check failed for {}: {}",
-                                                    target, e
-                                                );
-                                            }
-                                        }
+                                                    } else {
+                                                        format!(
+                                                            "$HOME/.local/share/slarti/agent/{}",
+                                                            version
+                                                        )
+                                                    };
+                                                    let remote_path =
+                                                        format!("{}/slarti-remote", remote_dir);
 
-                                        let _ = save_agent_state(&state);
+                                                    // Initialize a state record for this host.
+                                                    let mut state = AgentDeploymentState {
+                                                        alias: target.clone(),
+                                                        last_deployed_version: None,
+                                                        last_deployed_at: None,
+                                                        remote_path: Some(
+                                                            std::path::PathBuf::from(
+                                                                remote_path.clone(),
+                                                            ),
+                                                        ),
+                                                        remote_checksum: None,
+                                                        last_seen_ok: false,
+                                                    };
+
+                                                    // Check agent presence/version, then attempt a Hello handshake.
+                                                    match check_agent(
+                                                        &target,
+                                                        &remote_path,
+                                                        timeout,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(status)
+                                                            if status.present && status.can_run =>
+                                                        {
+                                                            // Try to connect and perform Hello/HelloAck.
+                                                            if let Ok(mut client) =
+                                                                run_agent(&target, &remote_path)
+                                                                    .await
+                                                            {
+                                                                if let Ok(hello) = client
+                                                                    .hello(
+                                                                        env!("CARGO_PKG_VERSION"),
+                                                                        Some(timeout),
+                                                                    )
+                                                                    .await
+                                                                {
+                                                                    state.last_deployed_version =
+                                                                        Some(
+                                                                            hello
+                                                                                .agent_version
+                                                                                .clone(),
+                                                                        );
+                                                                    state.last_seen_ok = true;
+                                                                }
+                                                                let _ = client.terminate().await;
+                                                            }
+                                                        }
+                                                        Ok(_) => {
+                                                            // Not present or not runnable; leave last_seen_ok = false and keep path for future deploy.
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "agent check failed for {}: {}",
+                                                                target, e
+                                                            );
+                                                        }
+                                                    }
+
+                                                    let _ = save_agent_state(&state);
+                                                    // Compute status text and update HostPanel
+                                                    let status_text = if state.last_seen_ok {
+                                                        match &state.last_deployed_version {
+                                                            Some(v) => format!("connected v{}", v),
+                                                            None => "connected".to_string(),
+                                                        }
+                                                    } else {
+                                                        "not present or incompatible".to_string()
+                                                    };
+                                                    let progress_done = "check complete";
+                                                    // Schedule UI update on the UI thread
+                                                    let _ = acx.update(|_window, cx| {
+                                                        let _ =
+                                                            host_handle.update(cx, |panel, cx| {
+                                                                panel.set_status(
+                                                                    status_text.clone(),
+                                                                    cx,
+                                                                );
+                                                                panel.push_progress(
+                                                                    progress_done,
+                                                                    cx,
+                                                                );
+                                                                panel.set_checking(false, cx);
+                                                            });
+                                                    });
+                                                })
+                                            });
                                     })
                                     .detach();
                             },
@@ -667,6 +852,24 @@ fn main() {
                     },
                 )
                 .unwrap();
+
+            // Save window bounds on every next frame (cheap sampling), and also on app quit.
+            let window_clone = window;
+            window_clone
+                .update(cx, |_, win, cx| {
+                    win.on_next_frame(move |w, _cx| {
+                        let b = w.bounds();
+                        let mut ui = load_ui_settings();
+                        ui.last_window_bounds = Some((
+                            b.origin.x.0 as i32,
+                            b.origin.y.0 as i32,
+                            b.size.width.0 as u32,
+                            b.size.height.0 as u32,
+                        ));
+                        save_ui_settings(ui);
+                    });
+                })
+                .ok();
 
             // Capture the container entity to forward keystrokes to the terminal panel.
             let container = window.update(cx, |_, _, cx| cx.entity()).unwrap();

@@ -18,6 +18,10 @@ pub struct HostPanelProps {
 pub struct HostPanel {
     focus: FocusHandle,
     selected_alias: Option<String>,
+    // Remote status and lightweight progress
+    status: SharedString,
+    checking: bool,
+    last_progress: Option<SharedString>,
 }
 
 impl HostPanel {
@@ -26,6 +30,9 @@ impl HostPanel {
         Self {
             focus: cx.focus_handle(),
             selected_alias: props.selected_alias,
+            status: SharedString::from("unknown"),
+            checking: false,
+            last_progress: None,
         }
     }
 
@@ -33,6 +40,30 @@ impl HostPanel {
     /// Call this from outside via entity.update to reflect host selection.
     pub fn set_selected_host(&mut self, alias: Option<String>, cx: &mut Context<Self>) {
         self.selected_alias = alias;
+        cx.notify();
+    }
+
+    /// Update the remote status text (e.g., "connected vX", "not present", "outdated").
+    pub fn set_status(&mut self, status: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.status = status.into();
+        cx.notify();
+    }
+
+    /// Toggle a lightweight "checking..." indicator.
+    pub fn set_checking(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.checking = on;
+        cx.notify();
+    }
+
+    /// Update the last progress message shown in the banner (optional).
+    pub fn push_progress(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.last_progress = Some(msg.into());
+        cx.notify();
+    }
+
+    /// Clear any progress message.
+    pub fn clear_progress(&mut self, cx: &mut Context<Self>) {
+        self.last_progress = None;
         cx.notify();
     }
 
@@ -131,6 +162,27 @@ impl gpui::Render for HostPanel {
                 .child(title)
         };
 
+        // Status banner: instantaneous render; updated by background tasks via setters.
+        let status_banner = {
+            let base = if self.checking {
+                format!("Remote: {} (checking…)", self.status)
+            } else {
+                format!("Remote: {}", self.status)
+            };
+            let text = if let Some(p) = &self.last_progress {
+                format!("{} — {}", base, p)
+            } else {
+                base
+            };
+            div()
+                .h(px(22.0))
+                .px(px(8.0))
+                .border_b_1()
+                .border_color(border)
+                .text_color(fg_dim)
+                .child(text)
+        };
+
         // Placeholder sections to be wired with real data later:
         // - Identity: alias, hostname, user, proxy jump chain, ssh port
         // - Services/Workloads: systemd services not in baseline, containers, ports
@@ -182,6 +234,7 @@ impl gpui::Render for HostPanel {
             .bg(bg)
             .text_color(fg_dim)
             .child(header)
+            .child(status_banner)
             // Content uses a simple vertical stack for now; in the future we can move to a
             // grid if we want equal-height cards or multi-column layout.
             .child(identity)
