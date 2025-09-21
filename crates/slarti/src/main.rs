@@ -60,9 +60,10 @@ impl ContainerView {
         window.minimize_window();
     }
 
-    fn on_maximize(&mut self, _: &MouseUpEvent, window: &mut Window, _cx: &mut Context<Self>) {
-        // Toggle platform zoom/maximize.
+    fn on_maximize(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Toggle platform zoom/maximize and request repaint so the icon swaps dynamically.
         window.zoom_window();
+        cx.notify();
     }
     // Custom titlebar drag-to-move (Wayland-friendly)
     fn on_titlebar_mouse_down(
@@ -76,11 +77,16 @@ impl ContainerView {
     }
     fn on_titlebar_mouse_up(
         &mut self,
-        _: &MouseUpEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        ev: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         self.dragging_window = false;
+        // Double-click to toggle maximize/restore
+        if ev.click_count >= 2 {
+            window.zoom_window();
+            cx.notify();
+        }
     }
 
     fn on_toggle_terminal(
@@ -222,10 +228,14 @@ impl gpui::Render for ContainerView {
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_maximize))
                             .child(
-                                UiVector::new("assets/generic_maximize.svg")
-                                    .square(px(14.0))
-                                    .color(text_color)
-                                    .render(),
+                                UiVector::new(if window.is_maximized() {
+                                    "assets/generic_restore.svg"
+                                } else {
+                                    "assets/generic_maximize.svg"
+                                })
+                                .square(px(14.0))
+                                .color(text_color)
+                                .render(),
                             ),
                     )
                     .child(
@@ -291,7 +301,11 @@ impl gpui::Render for ContainerView {
                         .child(
                             UiVector::new("assets/terminal.svg")
                                 .square(px(16.0))
-                                .color(text_color)
+                                .color(if !self.terminal_collapsed {
+                                    gpui::Hsla::from(gpui::rgba(0x74ace6ff))
+                                } else {
+                                    text_color
+                                })
                                 .render(),
                         ),
                 )
