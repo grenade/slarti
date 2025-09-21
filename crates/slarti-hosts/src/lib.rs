@@ -259,13 +259,23 @@ fn render_group_block(
                             }),
                         )
                         // status dot (placeholder color for now)
-                        .child(
-                            div()
-                                .w(px(6.0))
-                                .h(px(6.0))
-                                .rounded_full()
-                                .bg(gpui::opaque_grey(1.0, 0.5)),
-                        )
+                        .child({
+                            // Determine status color from cached agent state: green if last_seen_ok, else gray
+                            let color = (|| {
+                                if let Some(mut p) = dirs_next::data_local_dir() {
+                                    p.push("slarti");
+                                    p.push("agents");
+                                    p.push(format!("{}.json", alias));
+                                    if let Ok(s) = std::fs::read_to_string(p) {
+                                        if s.contains("\"last_seen_ok\": true") {
+                                            return gpui::green();
+                                        }
+                                    }
+                                }
+                                gpui::opaque_grey(1.0, 0.5)
+                            })();
+                            div().w(px(6.0)).h(px(6.0)).rounded_full().bg(color)
+                        })
                         .child(display)
                         .into_any_element(),
                 );

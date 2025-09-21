@@ -191,10 +191,16 @@ impl gpui::Render for HostPanel {
         let identity = self.render_section(
             "Identity",
             match self.selected_alias.as_ref() {
-                Some(a) => format!(
-                    "alias: {}\nhostname: (pending)\nuser: (pending)\nproxy: (pending)\nport: (pending)",
-                    a
-                ),
+                Some(a) => {
+                    let mut s = format!(
+                        "alias: {}\nhostname: (pending)\nuser: (pending)\nproxy: (pending)\nport: (pending)",
+                        a
+                    );
+                    if let Some(p) = &self.last_progress {
+                        s.push_str(&format!("\nsystem: {}", p));
+                    }
+                    s
+                }
                 None => "No host selected.\nSelect a host from the left to view details.".into(),
             },
             8.0,

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use slarti_proto::{Capability, Command, DirEntry, Response};
+use slarti_proto::{Capability, Command, DirEntry, Response, SysInfo};
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -59,6 +59,10 @@ async fn handle_command(cmd: Command) -> Result<Response> {
                 Capability::ProcessesSummary,
             ],
         }),
+        Command::SysInfo { id } => {
+            let info = sys_info().await?;
+            Ok(Response::SysInfoOk { id, info })
+        }
         Command::ListDir {
             id,
             path,
@@ -112,4 +116,41 @@ fn expand_tilde(path: String) -> String {
         }
     }
     path
+}
+
+async fn sys_info() -> Result<SysInfo> {
+    // OS and arch from Rust std
+    let os = std::env::consts::OS.to_string();
+    let arch = std::env::consts::ARCH.to_string();
+
+    // Kernel release from /proc (Linux)
+    let kernel = match fs::read_to_string("/proc/sys/kernel/osrelease").await {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => "unknown".to_string(),
+    };
+
+    // Uptime in seconds (first field of /proc/uptime)
+    let uptime_secs = match fs::read_to_string("/proc/uptime").await {
+        Ok(s) => s
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|f| f as u64)
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+
+    // Hostname from /proc, fallback to HOSTNAME env
+    let hostname = match fs::read_to_string("/proc/sys/kernel/hostname").await {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string()),
+    };
+
+    Ok(SysInfo {
+        os,
+        kernel,
+        arch,
+        uptime_secs,
+        hostname,
+    })
 }

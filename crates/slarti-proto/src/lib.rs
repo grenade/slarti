@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum Command {
     /// Client-initiated handshake
     Hello { id: u64, client_version: String },
+    /// Fetch basic system information
+    SysInfo { id: u64 },
     ListDir {
         id: u64,
         path: String,
@@ -21,6 +23,11 @@ pub enum Response {
         id: u64,
         agent_version: String,
         capabilities: Vec<Capability>,
+    },
+    /// Basic system information
+    SysInfoOk {
+        id: u64,
+        info: SysInfo,
     },
     ListDirOk {
         id: u64,
@@ -39,6 +46,15 @@ pub struct DirEntry {
     pub path: String,
     pub is_dir: bool,
     pub size: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SysInfo {
+    pub os: String,
+    pub kernel: String,
+    pub arch: String,
+    pub uptime_secs: u64,
+    pub hostname: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

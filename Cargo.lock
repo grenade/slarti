@@ -4965,6 +4965,7 @@ dependencies = [
  "serde_json",
  "slarti-host",
  "slarti-hosts",
+ "slarti-proto",
  "slarti-ssh",
  "slarti-sshcfg",
  "slarti-term",

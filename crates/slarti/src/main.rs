@@ -731,6 +731,7 @@ fn main() {
                                 window
                                     .spawn(hosts_cx, async move |acx| {
                                         // Create a dedicated Tokio runtime to run ssh/process IO.
+                                        let mut sys_summary: Option<String> = None;
                                         let _ = tokio::runtime::Builder::new_current_thread()
                                             .enable_all()
                                             .build()
@@ -801,6 +802,39 @@ fn main() {
                                                                                 .clone(),
                                                                         );
                                                                     state.last_seen_ok = true;
+
+                                                                    // Request SysInfo and persist a snapshot
+                                                                    // Import protocol types locally and track sys_info summary
+                                                                    use slarti_proto::{Command as ProtoCommand, Response as ProtoResponse};
+
+                                                                    let _ = client
+                                                                        .send_command(&ProtoCommand::SysInfo { id: 2 })
+                                                                        .await;
+
+                                                                    if let Ok(resp) = client.read_response_line().await {
+                                                                        if let ProtoResponse::SysInfoOk { id: _, info } = resp {
+                                                                            // Build a short summary for the HostPanel banner
+                                                                            sys_summary = Some(format!(
+                                                                                "{} {} {} host:{} uptime:{}s",
+                                                                                info.os,
+                                                                                info.kernel,
+                                                                                info.arch,
+                                                                                info.hostname,
+                                                                                info.uptime_secs
+                                                                            ));
+                                                                            // Persist snapshot under state dir
+                                                                            let mut snap_dir = slarti_state_dir();
+                                                                            snap_dir.push("hosts");
+                                                                            let _ = std::fs::create_dir_all(&snap_dir);
+                                                                            let mut snap_path = snap_dir.clone();
+                                                                            snap_path.push(format!("{}-sys_info.json", target));
+                                                                            let _ = std::fs::write(
+                                                                                snap_path,
+                                                                                serde_json::to_vec_pretty(&info)
+                                                                                    .unwrap_or_else(|_| serde_json::to_vec(&info).unwrap()),
+                                                                            );
+                                                                        }
+                                                                    }
                                                                 }
                                                                 let _ = client.terminate().await;
                                                             }
@@ -826,7 +860,9 @@ fn main() {
                                                     } else {
                                                         "not present or incompatible".to_string()
                                                     };
-                                                    let progress_done = "check complete";
+                                                    let progress_done = sys_summary
+                                                        .clone()
+                                                        .unwrap_or_else(|| "check complete".to_string());
                                                     // Schedule UI update on the UI thread
                                                     let _ = acx.update(|_window, cx| {
                                                         let _ =
@@ -836,7 +872,7 @@ fn main() {
                                                                     cx,
                                                                 );
                                                                 panel.push_progress(
-                                                                    progress_done,
+                                                                    progress_done.clone(),
                                                                     cx,
                                                                 );
                                                                 panel.set_checking(false, cx);
