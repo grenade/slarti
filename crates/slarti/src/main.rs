@@ -376,7 +376,7 @@ fn main() {
         // Capture the container entity to forward keystrokes to the terminal panel.
         let container = window.update(cx, |_, _, cx| cx.entity()).unwrap();
 
-        cx.observe_keystrokes(move |ev, window, cx| {
+        cx.observe_keystrokes(move |ev, _window, cx| {
             if let Some(ch) = ev.keystroke.key_char.clone() {
                 let bytes = ch.to_string().into_bytes();
                 let _ = container.update(cx, |cv, cx| {
