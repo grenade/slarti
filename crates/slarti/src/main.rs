@@ -1,6 +1,6 @@
 use gpui::{
-    div, prelude::*, px, size, App, Application, Bounds, Context, FocusHandle, Focusable,
-    MouseButton, MouseUpEvent, SharedString, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Size, Window, WindowBounds, WindowOptions,
 };
 
 // Terminal panel from the slarti-term crate
@@ -11,6 +11,11 @@ struct ContainerView {
     // Panels
     terminal: gpui::Entity<TerminalView>,
     terminal_collapsed: bool,
+    // Window state
+    dragging_window: bool,
+    resizing_edge: Option<gpui::ResizeEdge>,
+    saved_windowed_bounds: Option<Bounds<Pixels>>,
+    is_maximized: bool,
 }
 
 impl ContainerView {
@@ -19,6 +24,10 @@ impl ContainerView {
             focus: cx.focus_handle(),
             terminal,
             terminal_collapsed: false,
+            dragging_window: false,
+            resizing_edge: None,
+            saved_windowed_bounds: None,
+            is_maximized: false,
         }
     }
 
@@ -33,11 +42,28 @@ impl ContainerView {
         cx.hide();
     }
 
-    fn on_maximize(&mut self, _: &MouseUpEvent, window: &mut Window, _cx: &mut Context<Self>) {
-        // Naive maximize: toggle a modest size bump relative to current bounds.
-        let content_size = window.bounds().size;
-        // Swap width/height the same way as the gpui example
-        window.resize(size(content_size.height * 1.1, content_size.width * 1.1));
+    fn on_maximize(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Toggle maximize using stored bounds. For Wayland we simulate by resizing to display bounds.
+        if self.is_maximized {
+            if let Some(bounds) = self.saved_windowed_bounds.take() {
+                window.resize(bounds.size);
+                // Attempt to place origin back if supported
+                // Fallback: content-only resize already positions reasonably
+            }
+            self.is_maximized = false;
+        } else {
+            // Save current bounds and maximize to primary display
+            let current = window.bounds();
+            self.saved_windowed_bounds = Some(current);
+            let display_bounds = Bounds::centered(None, current.size, cx); // fallback
+                                                                           // If available, use primary display bounds; otherwise use current centered bounds
+            let size = Size {
+                width: display_bounds.size.width,
+                height: display_bounds.size.height,
+            };
+            window.resize(size);
+            self.is_maximized = true;
+        }
     }
 
     fn on_toggle_terminal(
@@ -53,6 +79,62 @@ impl ContainerView {
     fn on_focus_click(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle(cx));
     }
+
+    // Start dragging window from custom titlebar (Wayland compat)
+    fn on_titlebar_mouse_down(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.dragging_window = true;
+        window.start_window_move();
+    }
+
+    fn on_titlebar_mouse_up(
+        &mut self,
+        _: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.dragging_window = false;
+    }
+
+    // Edge resize handlers (Wayland compat)
+    fn on_resize_left(&mut self, _: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        window.start_window_resize(gpui::ResizeEdge::Left);
+    }
+    fn on_resize_right(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        window.start_window_resize(gpui::ResizeEdge::Right);
+    }
+    fn on_resize_top(&mut self, _: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        window.start_window_resize(gpui::ResizeEdge::Top);
+    }
+    fn on_resize_bottom(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        window.start_window_resize(gpui::ResizeEdge::Bottom);
+    }
+    fn on_resize_tl(&mut self, _: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        window.start_window_resize(gpui::ResizeEdge::TopLeft);
+    }
+    fn on_resize_tr(&mut self, _: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        window.start_window_resize(gpui::ResizeEdge::TopRight);
+    }
+    fn on_resize_bl(&mut self, _: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        window.start_window_resize(gpui::ResizeEdge::BottomLeft);
+    }
+    fn on_resize_br(&mut self, _: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
+        window.start_window_resize(gpui::ResizeEdge::BottomRight);
+    }
 }
 
 impl Focusable for ContainerView {
@@ -67,7 +149,7 @@ impl gpui::Render for ContainerView {
         let chrome_border = gpui::opaque_grey(0.2, 0.7);
         let text_color = gpui::white();
 
-        // Header: menu placeholder on the left, centered title, window controls on the right.
+        // Header: custom titlebar with drag-to-move and icon buttons
         let header = div()
             .flex()
             .flex_row()
@@ -78,7 +160,7 @@ impl gpui::Render for ContainerView {
             .bg(title_bar_bg)
             .border_b_1()
             .border_color(chrome_border)
-            // Left: collapsible menu placeholder
+            // Left: app/menu placeholder
             .child(
                 div()
                     .w(px(28.))
@@ -89,45 +171,45 @@ impl gpui::Render for ContainerView {
                     .cursor_default()
                     .child("≡"),
             )
-            // Center: app title
+            // Center: draggable region
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_center()
                     .size_full()
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_titlebar_mouse_up))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_titlebar_mouse_down))
                     .text_color(text_color)
                     .child("Slarti"),
             )
-            // Right: window controls
+            // Right: window controls (icons) - force white for dark header
             .child(
                 div()
                     .flex()
-                    .gap_2()
+                    .gap_3()
                     .child(
-                        div()
-                            .w(px(14.))
-                            .h(px(14.))
-                            .rounded_sm()
-                            .bg(gpui::yellow())
+                        svg()
+                            .path("assets/generic_minimize.svg")
+                            .size(px(14.0))
+                            .text_color(text_color)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_minimize)),
                     )
                     .child(
-                        div()
-                            .w(px(14.))
-                            .h(px(14.))
-                            .rounded_sm()
-                            .bg(gpui::green())
+                        svg()
+                            .path("assets/generic_maximize.svg")
+                            .size(px(14.0))
+                            .text_color(text_color)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_maximize)),
                     )
                     .child(
-                        div()
-                            .w(px(14.))
-                            .h(px(14.))
-                            .rounded_sm()
-                            .bg(gpui::red())
+                        svg()
+                            .path("assets/generic_close.svg")
+                            .size(px(14.0))
+                            .text_color(text_color)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_close)),
                     ),
@@ -148,28 +230,17 @@ impl gpui::Render for ContainerView {
                 .when(!self.terminal_collapsed, |d| d.child(self.terminal.clone()));
 
             // The content area itself also fills the available space
-            div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .size_full()
-                .bg(bg)
-                .child(panel)
+            div().flex().flex_col().size_full().bg(bg).child(panel)
         };
 
-        // Footer: buttons to expand/collapse child panels.
+        // Footer: terminal toggle button uses icon instead of text.
         let footer = {
-            let button_style = |label: SharedString| {
-                div()
-                    .px_2()
-                    .py(px(4.))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(chrome_border)
-                    .text_color(text_color)
-                    .cursor_pointer()
-                    .child(label)
-            };
+            let terminal_button = svg()
+                .path("assets/terminal.svg")
+                .size(px(18.0))
+                .text_color(text_color)
+                .cursor_pointer()
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal));
 
             div()
                 .flex()
@@ -181,15 +252,93 @@ impl gpui::Render for ContainerView {
                 .bg(title_bar_bg)
                 .border_t_1()
                 .border_color(chrome_border)
-                .child(
-                    button_style(SharedString::from(if self.terminal_collapsed {
-                        "Expand Terminal"
-                    } else {
-                        "Collapse Terminal"
-                    }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal)),
-                )
+                .child(terminal_button)
         };
+
+        // Edge/corner resize hit zones (Wayland)
+        let resize_overlay = div()
+            .absolute()
+            .inset(px(0.))
+            .child(
+                // Top edge
+                div()
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(8.))
+                    .right(px(8.))
+                    .h(px(6.))
+                    .cursor_n_resize()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_top)),
+            )
+            .child(
+                // Bottom edge
+                div()
+                    .absolute()
+                    .bottom(px(0.))
+                    .left(px(8.))
+                    .right(px(8.))
+                    .h(px(6.))
+                    .cursor_s_resize()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_bottom)),
+            )
+            .child(
+                // Left edge
+                div()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(8.))
+                    .bottom(px(8.))
+                    .w(px(6.))
+                    .cursor_w_resize()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_left)),
+            )
+            .child(
+                // Right edge
+                div()
+                    .absolute()
+                    .right(px(0.))
+                    .top(px(8.))
+                    .bottom(px(8.))
+                    .w(px(6.))
+                    .cursor_e_resize()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_right)),
+            )
+            .child(
+                // Top-left corner
+                div()
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(0.))
+                    .size(px(10.))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_tl)),
+            )
+            .child(
+                // Top-right corner
+                div()
+                    .absolute()
+                    .top(px(0.))
+                    .right(px(0.))
+                    .size(px(10.))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_tr)),
+            )
+            .child(
+                // Bottom-left corner
+                div()
+                    .absolute()
+                    .bottom(px(0.))
+                    .left(px(0.))
+                    .size(px(10.))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_bl)),
+            )
+            .child(
+                // Bottom-right corner
+                div()
+                    .absolute()
+                    .bottom(px(0.))
+                    .right(px(0.))
+                    .size(px(10.))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_resize_br)),
+            );
 
         div()
             .key_context("SlartiContainer")
@@ -199,6 +348,7 @@ impl gpui::Render for ContainerView {
             .size_full()
             .child(header)
             .child(content)
+            .child(resize_overlay)
             .child(footer)
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_focus_click))
     }
@@ -226,17 +376,18 @@ fn main() {
         // Capture the container entity to forward keystrokes to the terminal panel.
         let container = window.update(cx, |_, _, cx| cx.entity()).unwrap();
 
-        cx.observe_keystrokes(move |ev, _, cx| {
+        cx.observe_keystrokes(move |ev, window, cx| {
             if let Some(ch) = ev.keystroke.key_char.clone() {
                 let bytes = ch.to_string().into_bytes();
                 let _ = container.update(cx, |cv, cx| {
                     cv.terminal.update(cx, |term, _| term.write_bytes(&bytes));
+                    // Request an immediate repaint after sending input
                     cx.notify();
                 });
             } else {
                 let name = ev.keystroke.unparse();
                 let seq: Option<&[u8]> = match name.as_str() {
-                    "enter" => Some(b"\r"),
+                    "enter" => Some(b"\r\n"), // send CRLF for immediate command submission on some shells
                     "backspace" => Some(b"\x7f"),
                     "left" => Some(b"\x1b[D"),
                     "right" => Some(b"\x1b[C"),
