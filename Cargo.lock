@@ -4959,11 +4959,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "dirs-next",
  "gpui",
  "serde",
  "serde_json",
  "slarti-host",
  "slarti-hosts",
+ "slarti-ssh",
  "slarti-sshcfg",
  "slarti-term",
  "slarti-ui",
@@ -4982,7 +4984,9 @@ dependencies = [
 name = "slarti-hosts"
 version = "0.1.0"
 dependencies = [
+ "dirs-next",
  "gpui",
+ "serde",
  "slarti-sshcfg",
 ]
 

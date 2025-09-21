@@ -10,8 +10,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 gpui = { workspace = true }
+dirs-next = { workspace = true }
 slarti-term = { path = "../slarti-term" }
 slarti-ui = { path = "../slarti-ui" }
 slarti-sshcfg = { path = "../slarti-sshcfg" }
 slarti-hosts = { path = "../slarti-hosts" }
 slarti-host = { path = "../slarti-host" }
+slarti-ssh = { path = "../slarti-ssh" }

@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
 use anyhow::{anyhow, Context as _, Result};
 use slarti_proto::{Command, Response};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -185,13 +186,19 @@ pub struct HelloAck {
 ///
 /// Returns an `AgentStatus` with parsed stdout/stderr and basic flags.
 pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Result<AgentStatus> {
+    let needs_shell = remote_path.contains('~') || remote_path.contains('$');
+
     let mut cmd = TokioCommand::new("ssh");
-    cmd.arg("-T")
-        .arg(target)
-        .arg("--")
-        .arg(remote_path)
-        .arg("--version")
-        .stdin(Stdio::null())
+    cmd.arg("-T").arg(target).arg("--");
+    if needs_shell {
+        // Use a shell so $HOME / ~ expansion works on remote
+        cmd.arg("sh")
+            .arg("-lc")
+            .arg(format!("{} --version", remote_path));
+    } else {
+        cmd.arg(remote_path).arg("--version");
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -226,17 +233,23 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
 /// This does not perform the handshake automatically so the caller can decide how to handle
 /// version/capability mismatches.
 pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
-    let mut child = TokioCommand::new("ssh")
-        .arg("-T")
-        .arg(target)
-        .arg("--")
-        .arg(remote_path)
-        .arg("--stdio")
-        .stdin(Stdio::piped())
+    let needs_shell = remote_path.contains('~') || remote_path.contains('$');
+
+    let mut cmd = TokioCommand::new("ssh");
+    cmd.arg("-T").arg(target).arg("--");
+    if needs_shell {
+        // Use a shell so $HOME / ~ expansion works on remote
+        cmd.arg("sh")
+            .arg("-lc")
+            .arg(format!("{} --stdio", remote_path));
+    } else {
+        cmd.arg(remote_path).arg("--stdio");
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit()) // inherit stderr to expose remote errors interactively
-        .spawn()
-        .context("spawn ssh -T for agent")?;
+        .stderr(Stdio::inherit()); // inherit stderr to expose remote errors interactively
+
+    let mut child = cmd.spawn().context("spawn ssh -T for agent")?;
 
     let stdin: ChildStdin = child
         .stdin
@@ -254,5 +267,139 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
         child,
         reader,
         writer,
+    })
+}
+
+/// Determine if the remote user is root by querying `id -u` over SSH.
+/// Returns true if the UID is 0.
+pub async fn remote_user_is_root(target: &str, dur: Duration) -> Result<bool> {
+    let mut cmd = TokioCommand::new("ssh");
+    cmd.arg("-T")
+        .arg(target)
+        .arg("--")
+        .arg("sh")
+        .arg("-lc")
+        .arg("id -u")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let out = tokio::time::timeout(dur, cmd.output())
+        .await
+        .map_err(|_| anyhow!("ssh id -u timed out after {:?}", dur))?
+        .context("failed to run ssh for id -u")?;
+
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(stdout == "0")
+}
+
+/// Result of agent deployment.
+#[derive(Debug, Clone)]
+pub struct DeployResult {
+    pub remote_path: String,
+    pub used_rsync: bool,
+}
+
+/// Deploy the agent to a hard-coded path on the remote host:
+/// - Non-root: $HOME/.local/share/slarti/agent/<version>/slarti-remote
+/// - Root:     /usr/local/lib/slarti/agent/<version>/slarti-remote
+///
+/// The `local_artifact` can be a binary or a .tar.gz archive containing
+/// `bin/slarti-remote`. rsync is preferred; scp is used as a fallback.
+pub async fn deploy_agent(
+    target: &str,
+    local_artifact: &Path,
+    version: &str,
+    timeout: Duration,
+) -> Result<DeployResult> {
+    // Decide installation paths based on remote user.
+    let is_root = remote_user_is_root(target, timeout).await.unwrap_or(false);
+    let remote_dir = if is_root {
+        format!("/usr/local/lib/slarti/agent/{}", version)
+    } else {
+        format!("$HOME/.local/share/slarti/agent/{}", version)
+    };
+    let remote_path = format!("{}/slarti-remote", remote_dir);
+    let tmp_path = format!(
+        "/tmp/slarti-remote-{}-upload-{}",
+        version,
+        std::process::id()
+    );
+
+    // Upload artifact via rsync first, fallback to scp if rsync fails.
+    let mut used_rsync = false;
+    let rsync_dst = format!("{}:{}", target, tmp_path);
+
+    let rsync_status = TokioCommand::new("rsync")
+        .arg("-az")
+        .arg(local_artifact.as_os_str())
+        .arg(&rsync_dst)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status();
+
+    let mut uploaded = false;
+    if let Ok(Ok(status)) = tokio::time::timeout(timeout, rsync_status).await {
+        if status.success() {
+            used_rsync = true;
+            uploaded = true;
+        }
+    }
+
+    if !uploaded {
+        let scp_dst = rsync_dst; // same "target:tmp"
+        let scp_status = TokioCommand::new("scp")
+            .arg(local_artifact.as_os_str())
+            .arg(&scp_dst)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
+        if let Ok(Ok(status)) = tokio::time::timeout(timeout, scp_status).await {
+            if status.success() {
+                uploaded = true;
+            }
+        }
+    }
+
+    if !uploaded {
+        return Err(anyhow!("failed to upload agent (rsync/scp) to {}", target));
+    }
+
+    // Install on remote: create dir, move binary, chmod.
+    // We treat the local_artifact as a single binary (rsync/scp with -z for compression if needed).
+    let install_script = format!(
+        "DIR={dir}; TMP={tmp}; mkdir -p \"$DIR\" && mv \"$TMP\" \"$DIR/slarti-remote\" && chmod 755 \"$DIR/slarti-remote\"",
+        dir = remote_dir,
+        tmp = tmp_path
+    );
+
+    let mut ssh_install = TokioCommand::new("ssh");
+    ssh_install
+        .arg("-T")
+        .arg(target)
+        .arg("--")
+        .arg("sh")
+        .arg("-lc")
+        .arg(install_script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let status = tokio::time::timeout(timeout, ssh_install.status())
+        .await
+        .map_err(|_| anyhow!("ssh install timed out after {:?}", timeout))??;
+
+    if !status.success() {
+        return Err(anyhow!("remote install step failed on {}", target));
+    }
+
+    Ok(DeployResult {
+        remote_path,
+        used_rsync,
     })
 }

@@ -2,11 +2,87 @@ use gpui::{
     div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
     MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Window, WindowBounds, WindowOptions,
 };
+use serde::{Deserialize, Serialize};
 use slarti_host::{make_host_panel, HostPanel as HostInfoPanel, HostPanelProps as HostInfoProps};
 use slarti_hosts::{make_hosts_panel, HostsPanel, HostsPanelProps};
+use slarti_ssh::{check_agent, remote_user_is_root, run_agent};
 use slarti_sshcfg as sshcfg;
 use slarti_ui::{FsAssets, Vector as UiVector};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Persistent agent deployment information for a host alias.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentDeploymentState {
+    pub alias: String,
+    pub last_deployed_version: Option<String>,
+    pub last_deployed_at: Option<String>, // RFC3339
+    pub remote_path: Option<PathBuf>,
+    pub remote_checksum: Option<String>,
+    pub last_seen_ok: bool,
+}
+
+/// Live/known remote agent status for a host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RemoteAgentStatus {
+    Unknown,
+    NotPresent,
+    Outdated { remote_version: Option<String> },
+    Connecting,
+    Connected { agent_version: String },
+    Error { message: String },
+}
+
+/// Local persisted state store (per-app) keyed by host alias.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HostStateStore {
+    pub agents: HashMap<String, AgentDeploymentState>,
+}
+
+/// Basic state directory helpers for per-host agent state persistence.
+fn slarti_state_dir() -> std::path::PathBuf {
+    if let Some(mut dir) = dirs_next::data_local_dir() {
+        dir.push("slarti");
+        return dir;
+    }
+    // Fallback: ~/.local/state/slarti
+    let mut home = dirs_next::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.push(".local");
+    home.push("state");
+    home.push("slarti");
+    home
+}
+
+fn slarti_agents_state_dir() -> std::path::PathBuf {
+    let mut dir = slarti_state_dir();
+    dir.push("agents");
+    dir
+}
+
+fn agent_state_path(alias: &str) -> std::path::PathBuf {
+    let mut p = slarti_agents_state_dir();
+    p.push(format!("{}.json", alias));
+    p
+}
+
+/// Load persisted deployment state for a host alias (if present).
+fn load_agent_state(alias: &str) -> Option<AgentDeploymentState> {
+    let path = agent_state_path(alias);
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<AgentDeploymentState>(&data).ok()
+}
+
+/// Save/update persisted deployment state for a host alias.
+fn save_agent_state(state: &AgentDeploymentState) -> std::io::Result<()> {
+    let dir = slarti_agents_state_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = agent_state_path(&state.alias);
+    let data =
+        serde_json::to_vec_pretty(state).unwrap_or_else(|_| serde_json::to_vec(state).unwrap());
+    std::fs::write(path, data)
+}
 
 /// Minimal Vector wrapper around gpui::svg() to support Vector::color() like Zed.
 ///
@@ -32,6 +108,9 @@ struct ContainerView {
     host_info: gpui::Entity<HostInfoPanel>,
     terminal_collapsed: bool,
     ui_fg: (f32, f32, f32, f32),
+    // Remote/selection state
+    selected_alias: Option<String>,
+    agent_status: RemoteAgentStatus,
     // Window state for custom titlebar behavior
     dragging_window: bool,
     saved_windowed_bounds: Option<Bounds<Pixels>>,
@@ -53,6 +132,8 @@ impl ContainerView {
             host_info,
             terminal_collapsed: false,
             ui_fg,
+            selected_alias: None,
+            agent_status: RemoteAgentStatus::Unknown,
             dragging_window: false,
             saved_windowed_bounds: None,
             is_maximized: false,
@@ -290,9 +371,19 @@ impl gpui::Render for ContainerView {
                 // Top half: host observability panel (placeholder content for now)
                 .child(
                     div()
+                        .flex()
+                        .flex_col()
                         .h(px(260.0))
                         .border_b_1()
                         .border_color(chrome_border)
+                        // Simple remote status header above the Host panel
+                        .child(
+                            div()
+                                .h(px(24.0))
+                                .px(px(8.0))
+                                .text_color(gpui::opaque_grey(1.0, 0.85))
+                                .child("Remote: unknown"),
+                        )
                         .child(self.host_info.clone()),
                 )
                 // Bottom half: terminal fills remaining space
@@ -484,11 +575,78 @@ fn main() {
                         let host_info_handle = host_info.clone();
                         let on_select = Arc::new(
                             move |alias: String,
-                                  _window: &mut Window,
+                                  window: &mut Window,
                                   hosts_cx: &mut Context<HostsPanel>| {
+                                // Update the Host panel with the selected alias immediately.
                                 let _ = host_info_handle.update(hosts_cx, |panel, cx| {
                                     panel.set_selected_host(Some(alias.clone()), cx);
                                 });
+
+                                // Spawn an async task to check agent presence/version and persist state.
+                                let target = alias.clone();
+                                let version = env!("CARGO_PKG_VERSION").to_string();
+                                window
+                                    .spawn(hosts_cx, async move |_app| {
+                                        let timeout = Duration::from_secs(3);
+
+                                        // Decide remote install path based on remote user (root vs non-root).
+                                        let is_root = remote_user_is_root(&target, timeout)
+                                            .await
+                                            .unwrap_or(false);
+                                        let remote_dir = if is_root {
+                                            format!("/usr/local/lib/slarti/agent/{}", version)
+                                        } else {
+                                            format!("$HOME/.local/share/slarti/agent/{}", version)
+                                        };
+                                        let remote_path = format!("{}/slarti-remote", remote_dir);
+
+                                        // Initialize a state record for this host.
+                                        let mut state = AgentDeploymentState {
+                                            alias: target.clone(),
+                                            last_deployed_version: None,
+                                            last_deployed_at: None,
+                                            remote_path: Some(std::path::PathBuf::from(
+                                                remote_path.clone(),
+                                            )),
+                                            remote_checksum: None,
+                                            last_seen_ok: false,
+                                        };
+
+                                        // Check agent presence/version, then attempt a Hello handshake.
+                                        match check_agent(&target, &remote_path, timeout).await {
+                                            Ok(status) if status.present && status.can_run => {
+                                                // Try to connect and perform Hello/HelloAck.
+                                                if let Ok(mut client) =
+                                                    run_agent(&target, &remote_path).await
+                                                {
+                                                    if let Ok(hello) = client
+                                                        .hello(
+                                                            env!("CARGO_PKG_VERSION"),
+                                                            Some(timeout),
+                                                        )
+                                                        .await
+                                                    {
+                                                        state.last_deployed_version =
+                                                            Some(hello.agent_version.clone());
+                                                        state.last_seen_ok = true;
+                                                    }
+                                                    let _ = client.terminate().await;
+                                                }
+                                            }
+                                            Ok(_) => {
+                                                // Not present or not runnable; leave last_seen_ok = false and keep path for future deploy.
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "agent check failed for {}: {}",
+                                                    target, e
+                                                );
+                                            }
+                                        }
+
+                                        let _ = save_agent_state(&state);
+                                    })
+                                    .detach();
                             },
                         );
                         let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {

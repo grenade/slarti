@@ -198,6 +198,7 @@ fn render_group_block(
         div()
             .flex()
             .items_center()
+            .gap_2()
             .h(px(24.0))
             .pl(pad)
             .pr(px(8.0))
@@ -209,6 +210,14 @@ fn render_group_block(
                     let k = key.to_string();
                     move |this, ev, win, cx| this.on_toggle_group(ev, win, cx, k.clone())
                 }),
+            )
+            // status dot (placeholder color for now)
+            .child(
+                div()
+                    .w(px(8.0))
+                    .h(px(8.0))
+                    .rounded_full()
+                    .bg(gpui::opaque_grey(1.0, 0.5)),
             )
             .child(if expanded {
                 format!("▾ {}", label)
@@ -234,6 +243,7 @@ fn render_group_block(
                     div()
                         .flex()
                         .items_center()
+                        .gap_2()
                         .h(px(22.0))
                         .pl(px((depth as f32 + 1.0) * 24.0))
                         .pr(px(8.0))
@@ -247,6 +257,14 @@ fn render_group_block(
                                     this.on_select_host(ev, win, cx, alias.clone())
                                 }
                             }),
+                        )
+                        // status dot (placeholder color for now)
+                        .child(
+                            div()
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(gpui::opaque_grey(1.0, 0.5)),
                         )
                         .child(display)
                         .into_any_element(),
