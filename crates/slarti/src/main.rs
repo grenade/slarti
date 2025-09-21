@@ -11,9 +11,8 @@ struct ContainerView {
     // Panels
     terminal: gpui::Entity<TerminalView>,
     terminal_collapsed: bool,
-    // Window state
+    // Window state for custom titlebar behavior
     dragging_window: bool,
-    resizing_edge: Option<gpui::ResizeEdge>,
     saved_windowed_bounds: Option<Bounds<Pixels>>,
     is_maximized: bool,
 }
@@ -25,7 +24,6 @@ impl ContainerView {
             terminal,
             terminal_collapsed: false,
             dragging_window: false,
-            resizing_edge: None,
             saved_windowed_bounds: None,
             is_maximized: false,
         }
@@ -43,27 +41,37 @@ impl ContainerView {
     }
 
     fn on_maximize(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // Toggle maximize using stored bounds. For Wayland we simulate by resizing to display bounds.
+        // Coarse maximize/restore: save current bounds and resize to a centered large bounds
         if self.is_maximized {
             if let Some(bounds) = self.saved_windowed_bounds.take() {
                 window.resize(bounds.size);
-                // Attempt to place origin back if supported
-                // Fallback: content-only resize already positions reasonably
             }
             self.is_maximized = false;
         } else {
-            // Save current bounds and maximize to primary display
             let current = window.bounds();
             self.saved_windowed_bounds = Some(current);
-            let display_bounds = Bounds::centered(None, current.size, cx); // fallback
-                                                                           // If available, use primary display bounds; otherwise use current centered bounds
-            let size = Size {
-                width: display_bounds.size.width,
-                height: display_bounds.size.height,
-            };
-            window.resize(size);
+            let target = Bounds::centered(None, current.size, cx);
+            window.resize(target.size);
             self.is_maximized = true;
         }
+    }
+    // Custom titlebar drag-to-move (Wayland-friendly)
+    fn on_titlebar_mouse_down(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.dragging_window = true;
+        window.start_window_move();
+    }
+    fn on_titlebar_mouse_up(
+        &mut self,
+        _: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.dragging_window = false;
     }
 
     fn on_toggle_terminal(
@@ -78,26 +86,6 @@ impl ContainerView {
 
     fn on_focus_click(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle(cx));
-    }
-
-    // Start dragging window from custom titlebar (Wayland compat)
-    fn on_titlebar_mouse_down(
-        &mut self,
-        _: &MouseDownEvent,
-        window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        self.dragging_window = true;
-        window.start_window_move();
-    }
-
-    fn on_titlebar_mouse_up(
-        &mut self,
-        _: &MouseUpEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        self.dragging_window = false;
     }
 
     // Edge resize handlers (Wayland compat)
@@ -235,13 +223,6 @@ impl gpui::Render for ContainerView {
 
         // Footer: terminal toggle button uses icon instead of text.
         let footer = {
-            let terminal_button = svg()
-                .path("assets/terminal.svg")
-                .size(px(18.0))
-                .text_color(text_color)
-                .cursor_pointer()
-                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal));
-
             div()
                 .flex()
                 .flex_row()
@@ -252,7 +233,14 @@ impl gpui::Render for ContainerView {
                 .bg(title_bar_bg)
                 .border_t_1()
                 .border_color(chrome_border)
-                .child(terminal_button)
+                .child(
+                    svg()
+                        .path("assets/terminal.svg")
+                        .size(px(16.0))
+                        .text_color(text_color)
+                        .cursor_pointer()
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal)),
+                )
         };
 
         // Edge/corner resize hit zones (Wayland)
