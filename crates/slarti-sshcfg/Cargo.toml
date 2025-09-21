@@ -1,6 +1,17 @@
 [package]
-name = "slarti-hosts"
+name = "slarti-sshcfg"
 version = "0.1.0"
 edition = "2021"
+description = "SSH config parser for Slarti: loads ~/.ssh/config and recursively resolves Include directives."
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
+anyhow = { workspace = true }
+walkdir = { workspace = true }
+dirs-next = { workspace = true }
+regex = "1"
+glob = "0.3"
+shellexpand = "3"

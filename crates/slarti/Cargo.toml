@@ -12,3 +12,5 @@ bytes = { workspace = true }
 gpui = { workspace = true }
 slarti-term = { path = "../slarti-term" }
 slarti-ui = { path = "../slarti-ui" }
+slarti-sshcfg = { path = "../slarti-sshcfg" }
+slarti-hosts = { path = "../slarti-hosts" }

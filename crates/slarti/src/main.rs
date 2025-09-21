@@ -2,7 +2,10 @@ use gpui::{
     div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
     MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Window, WindowBounds, WindowOptions,
 };
+use slarti_hosts::{make_hosts_panel, HostsPanel, HostsPanelProps};
+use slarti_sshcfg as sshcfg;
 use slarti_ui::{FsAssets, Vector as UiVector};
+use std::sync::Arc;
 
 /// Minimal Vector wrapper around gpui::svg() to support Vector::color() like Zed.
 ///
@@ -24,6 +27,7 @@ struct ContainerView {
     focus: FocusHandle,
     // Panels
     terminal: gpui::Entity<TerminalView>,
+    hosts: gpui::Entity<HostsPanel>,
     terminal_collapsed: bool,
     ui_fg: (f32, f32, f32, f32),
     // Window state for custom titlebar behavior
@@ -36,11 +40,13 @@ impl ContainerView {
     fn new(
         cx: &mut Context<Self>,
         terminal: gpui::Entity<TerminalView>,
+        hosts: gpui::Entity<HostsPanel>,
         ui_fg: (f32, f32, f32, f32),
     ) -> Self {
         Self {
             focus: cx.focus_handle(),
             terminal,
+            hosts,
             terminal_collapsed: false,
             ui_fg,
             dragging_window: false,
@@ -258,22 +264,40 @@ impl gpui::Render for ContainerView {
                     ),
             );
 
-        // Content: make the terminal panel fill remaining space in the container.
+        // Content: two columns - hosts (left), terminal (right).
         let content = {
-            // Container background
             let bg = gpui::rgb(0x0b0b0b);
-            // The terminal panel fills all remaining height
-            let panel = div()
+
+            // Left: hosts tree sidebar
+            let sidebar = div()
                 .flex()
                 .flex_col()
-                .size_full() // take all remaining vertical space
-                .w_full()
-                .border_b_1()
+                .w(px(260.0))
+                .border_r_1()
                 .border_color(chrome_border)
+                .bg(bg)
+                .child(self.hosts.clone());
+
+            // Right: terminal panel fills remaining space
+            let right_inner = div()
+                .flex()
+                .flex_col()
+                .size_full()
                 .when(!self.terminal_collapsed, |d| d.child(self.terminal.clone()));
 
-            // The content area itself also fills the available space
-            div().flex().flex_col().size_full().bg(bg).child(panel)
+            let right = div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(bg)
+                .child(right_inner);
+
+            div()
+                .flex()
+                .flex_row()
+                .size_full()
+                .child(sidebar)
+                .child(right)
         };
 
         // Footer: terminal toggle button uses icon instead of text.
@@ -431,8 +455,27 @@ fn main() {
                         let term_cfg = TerminalConfig::default();
                         let ui_fg = term_cfg.theme.fg;
                         let terminal = cx.new(|cx| TerminalView::new(cx, term_cfg));
-                        // Build the container that will host panels (terminal and future ones).
-                        cx.new(|cx| ContainerView::new(cx, terminal, ui_fg))
+
+                        // Build the hosts panel from parsed SSH config.
+                        let on_select = Arc::new(|_alias: String| {
+                            // TODO: in a follow-up, start an ssh session to the selected host.
+                        });
+                        let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {
+                            sshcfg::model::ConfigTree {
+                                root: sshcfg::model::FileNode {
+                                    path: std::path::PathBuf::from("~/.ssh/config"),
+                                    hosts: vec![],
+                                    includes: vec![],
+                                },
+                            }
+                        });
+                        let hosts = cx.new(make_hosts_panel(HostsPanelProps {
+                            tree: cfg_tree,
+                            on_select: on_select.clone(),
+                        }));
+
+                        // Build the container that will host panels (hosts + terminal).
+                        cx.new(|cx| ContainerView::new(cx, terminal, hosts, ui_fg))
                     },
                 )
                 .unwrap();
