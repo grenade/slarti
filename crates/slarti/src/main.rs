@@ -891,24 +891,26 @@ fn main() {
                                                     // Increase SSH operation timeout for slower or multi-hop (ProxyJump) connections.
                                                     let timeout = Duration::from_secs(3);
 
-                                                    // Decide remote install path based on remote user (root vs non-root).
-                                                    let is_root =
-                                                        remote_user_is_root(&target, timeout)
-                                                            .await
-                                                            .unwrap_or(false);
-                                                    let remote_dir = if is_root {
-                                                        format!(
-                                                            "/usr/local/lib/slarti/agent/{}",
-                                                            version
-                                                        )
+                                                    // Choose remote install path from SSH config (avoid SSH roundtrip).
+                                                    // If the configured User is "root" for this alias, use the system path; otherwise use user-level path.
+                                                    let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {
+                                                        sshcfg::model::ConfigTree {
+                                                            root: sshcfg::model::FileNode {
+                                                                path: std::path::PathBuf::from("~/.ssh/config"),
+                                                                hosts: vec![],
+                                                                includes: vec![],
+                                                                matches: vec![],
+                                                            },
+                                                        }
+                                                    });
+                                                    // replaced by sshcfg::load::effective_user_for_alias
+                                                    let user_is_root = sshcfg::load::effective_user_for_alias(&cfg_tree, &target).as_deref() == Some("root");
+                                                    let remote_dir = if user_is_root {
+                                                        format!("/usr/local/lib/slarti/agent/{}", version)
                                                     } else {
-                                                        format!(
-                                                            "$HOME/.local/share/slarti/agent/{}",
-                                                            version
-                                                        )
+                                                        format!("$HOME/.local/share/slarti/agent/{}", version)
                                                     };
-                                                    let remote_path =
-                                                        format!("{}/slarti-remote", remote_dir);
+                                                    let remote_path = format!("{}/slarti-remote", remote_dir);
 
                                                     // Initialize a state record for this host.
                                                     let mut state = AgentDeploymentState {
@@ -1039,11 +1041,11 @@ fn main() {
                                                                 );
                                                                 panel.set_checking(false, cx);
                                                             });
+                                                        });
                                                     });
-                                                })
-                                            });
-                                    })
-                                    .detach();
+                                });
+                                })
+                                .detach();
                             },
                         );
                         let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {
@@ -1052,6 +1054,7 @@ fn main() {
                                     path: std::path::PathBuf::from("~/.ssh/config"),
                                     hosts: vec![],
                                     includes: vec![],
+                                    matches: vec![],
                                 },
                             }
                         });

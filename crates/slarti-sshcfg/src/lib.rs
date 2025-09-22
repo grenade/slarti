@@ -39,6 +39,7 @@ pub mod model {
         pub path: PathBuf,           // canonicalized if possible
         pub hosts: Vec<HostEntry>,   // hosts declared directly in this file
         pub includes: Vec<FileNode>, // resolved Include targets
+        pub matches: Vec<MatchRule>, // parsed Match blocks in this file
     }
 
     /// A single host entry as parsed from a `Host` block.
@@ -56,6 +57,23 @@ pub mod model {
             let k = key.to_ascii_lowercase();
             self.params.get(&k).map(|s| s.as_str())
         }
+    }
+
+    /// A parsed Match rule with a set of conditions and parameter overrides.
+    #[derive(Clone, Debug)]
+    pub struct MatchRule {
+        pub conditions: Vec<MatchCond>, // e.g. [Host([...]), User([...]), All]
+        pub params: BTreeMap<String, String>, // parameters inside the Match block
+        pub source: PathBuf,            // file of this match rule
+        pub line: usize,                // starting line of the Match directive
+    }
+
+    /// Subset of OpenSSH Match conditions we support.
+    #[derive(Clone, Debug)]
+    pub enum MatchCond {
+        Host(Vec<String>),
+        User(Vec<String>),
+        All,
     }
 }
 
@@ -99,6 +117,139 @@ pub mod load {
     }
 
     // ----------------------
+    // Effective user resolution
+    // ----------------------
+    /// Resolve the effective User for a given alias by:
+    /// - finding the most specific matching Host entry (exact match preferred over globs),
+    /// - then applying any matching Match rules (Host/User/All) in a best-effort order.
+    pub fn effective_user_for_alias(tree: &ConfigTree, alias: &str) -> Option<String> {
+        use crate::model::{FileNode, HostEntry, MatchCond};
+        // Flatten nodes depth-first
+        fn collect<'a>(n: &'a FileNode, out: &mut Vec<&'a FileNode>) {
+            out.push(n);
+            for inc in &n.includes {
+                collect(inc, out);
+            }
+        }
+        fn glob_match_simple(pat: &str, s: &str) -> bool {
+            // Support * and ? only.
+            let mut pi = 0usize;
+            let bytes_p = pat.as_bytes();
+            let bytes_s = s.as_bytes();
+            let mut si = 0usize;
+            let mut star: Option<(usize, usize)> = None;
+            while si < bytes_s.len() {
+                if pi < bytes_p.len() {
+                    match bytes_p[pi] {
+                        b'?' => {
+                            pi += 1;
+                            si += 1;
+                            continue;
+                        }
+                        b'*' => {
+                            star = Some((pi, si));
+                            pi += 1;
+                            continue;
+                        }
+                        _ => {
+                            if bytes_p[pi] == bytes_s[si] {
+                                pi += 1;
+                                si += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if let Some((sp, ss)) = star {
+                    pi = sp + 1;
+                    si = ss + 1;
+                    star = Some((sp, si));
+                } else {
+                    return false;
+                }
+            }
+            while pi < bytes_p.len() && bytes_p[pi] == b'*' {
+                pi += 1;
+            }
+            pi == bytes_p.len()
+        }
+        let mut nodes = Vec::new();
+        collect(&tree.root, &mut nodes);
+        // Pick host entry: exact match preferred; among equals, pick with greatest line.
+        let mut best_exact: Option<(&HostEntry, usize)> = None;
+        let mut best_glob: Option<(&HostEntry, usize)> = None;
+        for n in &nodes {
+            for h in &n.hosts {
+                if h.patterns.iter().any(|p| p == alias) {
+                    if best_exact.map(|(_, l)| h.line > l).unwrap_or(true) {
+                        best_exact = Some((h, h.line));
+                    }
+                } else if h
+                    .patterns
+                    .iter()
+                    .any(|p| is_glob_pattern(p) && glob_match_simple(p, alias))
+                {
+                    if best_glob.map(|(_, l)| h.line > l).unwrap_or(true) {
+                        best_glob = Some((h, h.line));
+                    }
+                }
+            }
+        }
+        let base = best_exact.or(best_glob).map(|(h, _)| h);
+        let mut user = base.and_then(|h| h.get("user")).map(|s| s.to_string());
+        // Apply match rules
+        for n in &nodes {
+            for m in &n.matches {
+                let mut ok = true;
+                for c in &m.conditions {
+                    match c {
+                        MatchCond::All => {}
+                        MatchCond::Host(pats) => {
+                            if !pats.iter().any(|p| {
+                                if p == alias {
+                                    true
+                                } else if is_glob_pattern(p) {
+                                    glob_match_simple(p, alias)
+                                } else {
+                                    false
+                                }
+                            }) {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        MatchCond::User(pats) => {
+                            if let Some(ref u) = user {
+                                if !pats.iter().any(|p| {
+                                    if p == u {
+                                        true
+                                    } else if is_glob_pattern(p) {
+                                        glob_match_simple(p, u)
+                                    } else {
+                                        false
+                                    }
+                                }) {
+                                    ok = false;
+                                    break;
+                                }
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if ok {
+                    if let Some(v) = m.params.get("user") {
+                        user = Some(v.clone());
+                    }
+                }
+            }
+        }
+        user
+    }
+
+    // ----------------------
     // Parsing implementation
     // ----------------------
 
@@ -119,6 +270,7 @@ pub mod load {
                     path: c.clone(),
                     hosts: vec![],
                     includes: vec![],
+                    matches: vec![],
                 });
             }
         }
@@ -127,6 +279,7 @@ pub mod load {
             .with_context(|| format!("reading SSH config {}", resolved.display()))?;
         let mut includes: Vec<FileNode> = Vec::new();
         let mut hosts: Vec<HostEntry> = Vec::new();
+        let mut matches: Vec<crate::model::MatchRule> = Vec::new();
 
         // Current host block being assembled
         #[derive(Default)]
@@ -135,10 +288,16 @@ pub mod load {
             params: BTreeMap<String, String>,
             start_line: usize,
         }
+        #[derive(Default)]
+        struct CurrentMatch {
+            conditions: Vec<crate::model::MatchCond>,
+            params: BTreeMap<String, String>,
+            start_line: usize,
+        }
         let mut cur: Option<CurrentHost> = None;
+        let mut cur_match: Option<CurrentMatch> = None;
 
         let mut line_no = 0usize;
-        let mut skipping_match_block = false;
 
         for raw_line in text.lines() {
             line_no += 1;
@@ -155,15 +314,77 @@ pub mod load {
 
             let key = tokens[0].to_ascii_lowercase();
 
-            // Handle Match blocks (ignore until next Host or end). This is a simplification.
+            // Handle Match blocks: parse conditions and collect parameters until next Host/Match.
             if key == "match" {
-                skipping_match_block = true;
-                continue;
-            }
-            if key == "host" {
-                skipping_match_block = false;
-            }
-            if skipping_match_block {
+                // Finalize any previous match block.
+                if let Some(prev) = cur_match.take() {
+                    matches.push(crate::model::MatchRule {
+                        conditions: prev.conditions,
+                        params: prev.params,
+                        source: canonicalize_best_effort(&resolved)
+                            .unwrap_or_else(|| resolved.clone()),
+                        line: prev.start_line,
+                    });
+                }
+                // Parse conditions from tokens[1..]
+                let mut conds: Vec<crate::model::MatchCond> = Vec::new();
+                let mut i = 1usize;
+                while i < tokens.len() {
+                    let t = tokens[i].to_ascii_lowercase();
+                    match t.as_str() {
+                        "all" => {
+                            conds.push(crate::model::MatchCond::All);
+                            i += 1;
+                        }
+                        "host" => {
+                            i += 1;
+                            let mut pats = Vec::new();
+                            while i < tokens.len() {
+                                let peek = tokens[i].to_ascii_lowercase();
+                                if peek == "user"
+                                    || peek == "host"
+                                    || peek == "all"
+                                    || peek == "final"
+                                {
+                                    break;
+                                }
+                                pats.push(tokens[i].clone());
+                                i += 1;
+                            }
+                            if !pats.is_empty() {
+                                conds.push(crate::model::MatchCond::Host(pats));
+                            }
+                        }
+                        "user" => {
+                            i += 1;
+                            let mut pats = Vec::new();
+                            while i < tokens.len() {
+                                let peek = tokens[i].to_ascii_lowercase();
+                                if peek == "user"
+                                    || peek == "host"
+                                    || peek == "all"
+                                    || peek == "final"
+                                {
+                                    break;
+                                }
+                                pats.push(tokens[i].clone());
+                                i += 1;
+                            }
+                            if !pats.is_empty() {
+                                conds.push(crate::model::MatchCond::User(pats));
+                            }
+                        }
+                        // ignore unsupported criteria like "final", "exec", etc.
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+                cur_match = Some(CurrentMatch {
+                    conditions: conds,
+                    params: BTreeMap::new(),
+                    start_line: line_no,
+                });
                 continue;
             }
 
@@ -182,7 +403,17 @@ pub mod load {
                     }
                 }
                 "host" => {
-                    // Push previous
+                    // Finalize any pending match block before starting a new host block.
+                    if let Some(prevm) = cur_match.take() {
+                        matches.push(crate::model::MatchRule {
+                            conditions: prevm.conditions,
+                            params: prevm.params,
+                            source: canonicalize_best_effort(&resolved)
+                                .unwrap_or_else(|| resolved.clone()),
+                            line: prevm.start_line,
+                        });
+                    }
+                    // Push previous host
                     if let Some(prev) = cur.take() {
                         hosts.push(HostEntry {
                             patterns: prev.patterns,
@@ -209,8 +440,13 @@ pub mod load {
                     }
                 }
                 _ => {
-                    // Parameter line inside a Host block
-                    if let Some(ref mut h) = cur {
+                    // Parameter line: populate current Match block if active, otherwise current Host.
+                    if let Some(ref mut m) = cur_match {
+                        if tokens.len() >= 2 {
+                            let value = join_tokens(&tokens[1..]);
+                            m.params.insert(key, value);
+                        }
+                    } else if let Some(ref mut h) = cur {
                         // params may have form: Key value(with spaces possibly quoted)
                         // tokens[1..] joined with single spaces as the value
                         if tokens.len() >= 2 {
@@ -224,10 +460,18 @@ pub mod load {
             }
         }
 
-        // Push tail host
+        // Push tail host and any pending match block
         if let Some(prev) = cur.take() {
             hosts.push(HostEntry {
                 patterns: prev.patterns,
+                params: prev.params,
+                source: canonicalize_best_effort(&resolved).unwrap_or_else(|| resolved.clone()),
+                line: prev.start_line,
+            });
+        }
+        if let Some(prev) = cur_match.take() {
+            matches.push(crate::model::MatchRule {
+                conditions: prev.conditions,
                 params: prev.params,
                 source: canonicalize_best_effort(&resolved).unwrap_or_else(|| resolved.clone()),
                 line: prev.start_line,
@@ -238,6 +482,7 @@ pub mod load {
             path: canonicalize_best_effort(&resolved).unwrap_or(resolved),
             hosts,
             includes,
+            matches,
         })
     }
 
