@@ -438,7 +438,7 @@ impl gpui::Render for HostPanel {
         // Brief services list (first 10), if available
         let services_brief = if let Some(list) = &self.services {
             let mut rows = Vec::new();
-            for s in list.iter().take(10) {
+            for s in list.iter() {
                 rows.push(
                     div()
                         .flex()
