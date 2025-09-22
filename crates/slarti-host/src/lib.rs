@@ -485,7 +485,8 @@ impl gpui::Render for HostPanel {
                     .flex_col()
                     .size_full()
                     .overflow_y_scroll()
-                    .child(identity),
+                    .child(identity)
+                    .child(services_brief),
             )
     }
 }
