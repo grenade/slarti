@@ -1,8 +1,10 @@
 use anyhow::{anyhow, Result};
-use slarti_proto::{Capability, Command, DirEntry, Response, StaticConfig, SysInfo};
+use slarti_proto::{Capability, Command, DirEntry, Response, ServiceInfo, StaticConfig, SysInfo};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command as TokioCommand;
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -66,6 +68,10 @@ async fn handle_command(cmd: Command) -> Result<Response> {
         Command::StaticConfig { id } => {
             let config = static_config().await?;
             Ok(Response::StaticConfigOk { id, config })
+        }
+        Command::ServicesList { id } => {
+            let services = services_list().await?;
+            Ok(Response::ServicesListOk { id, services })
         }
         Command::ListDir {
             id,
@@ -189,4 +195,82 @@ async fn static_config() -> Result<StaticConfig> {
         cpu_count,
         mem_total_bytes,
     })
+}
+
+async fn services_list() -> Result<Vec<ServiceInfo>> {
+    // Build enabled/disabled map from unit files
+    let mut enabled_map: HashMap<String, Option<bool>> = HashMap::new();
+    if let Ok(out) = TokioCommand::new("systemctl")
+        .arg("list-unit-files")
+        .arg("--type=service")
+        .arg("--no-legend")
+        .arg("--no-pager")
+        .output()
+        .await
+    {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            for line in s.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                if let (Some(name), Some(state)) = (parts.next(), parts.next()) {
+                    let enabled = match state {
+                        "enabled" | "enabled-runtime" => Some(true),
+                        "disabled" => Some(false),
+                        _ => None,
+                    };
+                    enabled_map.insert(name.to_string(), enabled);
+                }
+            }
+        }
+    }
+
+    let mut services = Vec::new();
+    if let Ok(out) = TokioCommand::new("systemctl")
+        .arg("list-units")
+        .arg("--type=service")
+        .arg("--no-legend")
+        .arg("--no-pager")
+        .output()
+        .await
+    {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            for line in s.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                // Expected columns: UNIT LOAD ACTIVE SUB DESCRIPTION
+                let mut it = line.split_whitespace();
+                let unit = match it.next() {
+                    Some(u) => u,
+                    None => continue,
+                };
+                // Skip LOAD
+                let _load = it.next();
+                let active = it.next().unwrap_or("unknown").to_string();
+                let sub = it.next().unwrap_or("unknown").to_string();
+                let rest: Vec<&str> = it.collect();
+                let description = if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                };
+                let enabled = enabled_map.get(unit).cloned().unwrap_or(None);
+                services.push(ServiceInfo {
+                    name: unit.to_string(),
+                    description,
+                    active_state: active,
+                    sub_state: sub,
+                    enabled,
+                });
+            }
+        }
+    }
+
+    Ok(services)
 }

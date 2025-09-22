@@ -1005,9 +1005,12 @@ fn main() {
                                                                     let _ = client
                                                                         .send_command(&ProtoCommand::SysInfo { id: 2 })
                                                                         .await;
-                                                                    // Queue StaticConfig immediately after SysInfo
+                                                                    // Queue StaticConfig and ServicesList after SysInfo
                                                                     let _ = client
                                                                         .send_command(&ProtoCommand::StaticConfig { id: 3 })
+                                                                        .await;
+                                                                    let _ = client
+                                                                        .send_command(&ProtoCommand::ServicesList { id: 4 })
                                                                         .await;
 
                                                                     if let Ok(resp) = client.read_response_line().await {
@@ -1049,6 +1052,20 @@ fn main() {
                                                                             let _ = acx.update(|_w, cxu| {
                                                                                 let _ = host_handle.update(cxu, |panel, cxp| {
                                                                                     panel.push_progress(brief.clone(), cxp);
+                                                                                });
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                    // Read the ServicesList response and add a brief summary
+                                                                    if let Ok(resp3) = client.read_response_line().await {
+                                                                        if let ProtoResponse::ServicesListOk { id: _, services } = resp3 {
+                                                                            let total = services.len();
+                                                                            let active = services.iter().filter(|s| s.active_state == "active").count();
+                                                                            let failed = services.iter().filter(|s| s.active_state == "failed").count();
+                                                                            let brief = format!("services: total {} active {} failed {}", total, active, failed);
+                                                                            let _ = acx.update(|_w, cxu| {
+                                                                                let _ = host_handle.update(cxu, |panel, cxp| {
+                                                                                    panel.push_progress(brief, cxp);
                                                                                 });
                                                                             });
                                                                         }

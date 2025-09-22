@@ -9,6 +9,8 @@ pub enum Command {
     SysInfo { id: u64 },
     /// Fetch static system configuration
     StaticConfig { id: u64 },
+    /// List services from systemd
+    ServicesList { id: u64 },
     ListDir {
         id: u64,
         path: String,
@@ -35,6 +37,11 @@ pub enum Response {
     StaticConfigOk {
         id: u64,
         config: StaticConfig,
+    },
+    /// Services list
+    ServicesListOk {
+        id: u64,
+        services: Vec<ServiceInfo>,
     },
     ListDirOk {
         id: u64,
@@ -69,6 +76,15 @@ pub struct StaticConfig {
     pub os_release: Option<String>,
     pub cpu_count: u32,
     pub mem_total_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ServiceInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub active_state: String,
+    pub sub_state: String,
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
