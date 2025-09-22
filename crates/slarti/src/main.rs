@@ -917,7 +917,23 @@ fn main() {
                                             // NOTE: rsync/scp deployment will respect your SSH config (including ProxyJump)
                                             // because we invoke the system ssh/rsync binaries and inherit environment.
                                             // Increase SSH operation timeout for slower or multi-hop (ProxyJump) connections.
-                                            let timeout = Duration::from_secs(3);
+                                            let timeout = {
+                                                // Per-host timeout precedence:
+                                                // 1) SLARTI_SSH_TIMEOUT_SECS_<ALIAS_IN_UPPERCASE>
+                                                // 2) SLARTI_SSH_TIMEOUT_SECS
+                                                // 3) default 3s
+                                                let env_key = format!(
+                                                    "SLARTI_SSH_TIMEOUT_SECS_{}",
+                                                    target.to_uppercase()
+                                                );
+                                                let per_host = std::env::var(&env_key)
+                                                    .ok()
+                                                    .and_then(|s| s.parse::<u64>().ok());
+                                                let global = std::env::var("SLARTI_SSH_TIMEOUT_SECS")
+                                                    .ok()
+                                                    .and_then(|s| s.parse::<u64>().ok());
+                                                Duration::from_secs(per_host.or(global).unwrap_or(3))
+                                            };
 
                                             // Choose remote install path from SSH config (avoid SSH roundtrip).
                                             // If the configured User is "root" for this alias, use the system path; otherwise use user-level path.
@@ -944,6 +960,13 @@ fn main() {
                                                     };
 
                                                     // Check agent presence/version, then attempt a Hello handshake.
+                                                    tracing::debug!(
+                                                        target: "slarti_ssh",
+                                                        "[slarti/select] check_agent target={} timeout={:?} remote_path={}",
+                                                        target,
+                                                        timeout,
+                                                        remote_path
+                                                    );
                                                     match check_agent(
                                                         &target,
                                                         &remote_path,
@@ -1015,9 +1038,12 @@ fn main() {
                                                         }
                                                         Err(e) => {
                                                             eprintln!(
-                                                                "agent check failed for {} (ssh reachable interactively?): {}. \
-    Hint: we inherit your SSH config (including ProxyJump); if this keeps timing out, try increasing the app's SSH timeout.",
-                                                                target, e
+                                                                "agent check failed for {}: {}. Hint: we inherit your SSH config (including ProxyJump). If this is a timeout, try increasing the app SSH timeout for this host (SLARTI_SSH_TIMEOUT_SECS or SLARTI_SSH_TIMEOUT_SECS_{}). Context: timeout={:?}, remote_path={}",
+                                                                target,
+                                                                e,
+                                                                target.to_uppercase(),
+                                                                timeout,
+                                                                remote_path
                                                             );
                                                             // Surface error to HostPanel immediately
                                                             let msg = format!("error: {}", e);

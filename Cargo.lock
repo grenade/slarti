@@ -5059,6 +5059,7 @@ dependencies = [
  "serde_json",
  "slarti-proto",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

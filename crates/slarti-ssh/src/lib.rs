@@ -44,6 +44,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as TokioCommand};
+use tracing::debug;
 
 /// Result of checking a remote agent via `ssh -T <target> -- <remote_path> --version`
 #[derive(Debug, Clone)]
@@ -190,12 +191,11 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
 
     let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
     let mut cmd = TokioCommand::new("ssh");
+    // Start timing and prepare a debuggable command string
+    let started = std::time::Instant::now();
+    let dbg_cmd: String;
     cmd.envs(std::env::vars()); // inherit environment to respect user SSH config (SSH_AUTH_SOCK, etc.)
-                                // Optional verbose debugging when SLARTI_SSH_DEBUG is set
-    let verbose = std::env::var("SLARTI_SSH_DEBUG").is_ok();
-    if verbose {
-        cmd.arg("-vvv");
-    }
+    debug!(target: "slarti_ssh", "check_agent: target={} dur={:?} remote_path={} needs_shell={}", target, dur, remote_path, needs_shell);
     cmd.arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -215,17 +215,50 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
     } else {
         cmd.arg(remote_path).arg("--version");
     }
+    // Build a debuggable command string for diagnostics (does not affect execution)
+    dbg_cmd = {
+        let mut s = format!(
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o {} -o Compression=yes -T {} -- ",
+            &connect_timeout,
+            target
+        );
+        if needs_shell {
+            s.push_str(&format!("sh -lc '{} --version'", remote_path));
+        } else {
+            s.push_str(&format!("{} --version", remote_path));
+        }
+        s
+    };
+
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     let out = tokio::time::timeout(dur, cmd.output())
         .await
-        .map_err(|_| anyhow!("ssh check timed out after {:?}", dur))?
+        .map_err(|_| {
+            let elapsed = started.elapsed();
+            anyhow!(
+                "ssh check timed out after {:?} (elapsed {:?}, cmd={})",
+                dur,
+                elapsed,
+                dbg_cmd
+            )
+        })?
         .context("failed to run ssh")?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    debug!(
+        target: "slarti_ssh",
+        "check_agent: target={} elapsed={:?} status={} stdout_len={} stderr_len={} cmd={}",
+        target,
+        started.elapsed(),
+        out.status,
+        out.stdout.len(),
+        out.stderr.len(),
+        dbg_cmd
+    );
 
     if !out.status.success() {
         // Normalize common "missing/not executable" cases to a non-fatal status so the UI can offer Deploy.
@@ -281,12 +314,10 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
     let needs_shell = remote_path.contains('~') || remote_path.contains('$');
 
     let mut cmd = TokioCommand::new("ssh");
+    let started = std::time::Instant::now();
+    let dbg_cmd: String;
     cmd.envs(std::env::vars());
-    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
-    let verbose = std::env::var("SLARTI_SSH_DEBUG").is_ok();
-    if verbose {
-        cmd.arg("-vvv");
-    }
+    debug!(target: "slarti_ssh", "run_agent: target={} remote_path={} needs_shell={}", target, remote_path, needs_shell);
     cmd.arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -306,6 +337,25 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
     } else {
         cmd.arg(remote_path).arg("--stdio");
     }
+    // Build a debuggable command string for diagnostics (does not affect execution)
+    dbg_cmd = {
+        let mut s = format!(
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o Compression=yes -T {} -- ",
+            target
+        );
+        if needs_shell {
+            s.push_str(&format!("sh -lc '{} --stdio'", remote_path));
+        } else {
+            s.push_str(&format!("{} --stdio", remote_path));
+        }
+        s
+    };
+    debug!(
+        target: "slarti_ssh",
+        "run_agent: spawning: cmd={} (started {:?})",
+        dbg_cmd, started
+    );
+
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit()); // inherit stderr to expose remote errors interactively
@@ -337,11 +387,7 @@ pub async fn remote_user_is_root(target: &str, dur: Duration) -> Result<bool> {
     let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
     let mut cmd = TokioCommand::new("ssh");
     cmd.envs(std::env::vars());
-    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
-    let verbose = std::env::var("SLARTI_SSH_DEBUG").is_ok();
-    if verbose {
-        cmd.arg("-vvv");
-    }
+    debug!(target: "slarti_ssh", "remote_user_is_root: target={} dur={:?}", target, dur);
     cmd.arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
