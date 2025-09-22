@@ -4988,6 +4988,7 @@ dependencies = [
  "dirs-next",
  "gpui",
  "serde",
+ "serde_json",
  "slarti-sshcfg",
 ]
 

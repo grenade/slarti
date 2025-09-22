@@ -1,6 +1,8 @@
 use gpui::{
-    div, prelude::*, px, App, Context, FocusHandle, Focusable, Pixels, SharedString, Window,
+    div, prelude::*, px, App, Context, FocusHandle, Focusable, MouseButton, Pixels, SharedString,
+    Window,
 };
+use std::sync::Arc;
 
 /// Properties for constructing a HostPanel.
 ///
@@ -10,6 +12,8 @@ use gpui::{
 pub struct HostPanelProps {
     /// The currently selected host alias (from the hosts panel), if any.
     pub selected_alias: Option<String>,
+    /// Optional deploy callback invoked when the 'Deploy agent' button is clicked.
+    pub on_deploy: Option<Arc<dyn Fn(&mut Window, &mut Context<HostPanel>) + Send + Sync>>,
 }
 
 /// HostPanel shows high-level information and observations about the
@@ -22,6 +26,8 @@ pub struct HostPanel {
     status: SharedString,
     checking: bool,
     last_progress: Option<SharedString>,
+    // Optional deploy callback
+    on_deploy: Option<Arc<dyn Fn(&mut Window, &mut Context<HostPanel>) + Send + Sync>>,
 }
 
 impl HostPanel {
@@ -33,6 +39,7 @@ impl HostPanel {
             status: SharedString::from("unknown"),
             checking: false,
             last_progress: None,
+            on_deploy: props.on_deploy,
         }
     }
 
@@ -64,6 +71,16 @@ impl HostPanel {
     /// Clear any progress message.
     pub fn clear_progress(&mut self, cx: &mut Context<Self>) {
         self.last_progress = None;
+        cx.notify();
+    }
+
+    /// Set or update the deploy callback used when clicking the "Deploy agent" button.
+    pub fn set_on_deploy(
+        &mut self,
+        cb: Option<Arc<dyn Fn(&mut Window, &mut Context<HostPanel>) + Send + Sync>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_deploy = cb;
         cx.notify();
     }
 
@@ -174,13 +191,44 @@ impl gpui::Render for HostPanel {
             } else {
                 base
             };
-            div()
+            let row = div()
+                .flex()
+                .items_center()
+                .justify_between()
                 .h(px(22.0))
                 .px(px(8.0))
                 .border_b_1()
                 .border_color(border)
                 .text_color(fg_dim)
-                .child(text)
+                .child(text);
+            if !self.checking {
+                // Show a small 'Deploy agent' button when not checking
+                let btn = div()
+                    .px(px(8.0))
+                    .h(px(18.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(border)
+                    .cursor_pointer()
+                    .text_color(gpui::white())
+                    .child("Deploy agent")
+                    .on_mouse_up(MouseButton::Left, {
+                        let cb = self.on_deploy.clone();
+                        _cx.listener(
+                            move |_this: &mut Self,
+                                  _ev: &gpui::MouseUpEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<HostPanel>| {
+                                if let Some(cb) = cb.as_ref() {
+                                    (cb)(window, cx);
+                                }
+                            },
+                        )
+                    });
+                row.child(btn)
+            } else {
+                row
+            }
         };
 
         // Placeholder sections to be wired with real data later:
@@ -241,12 +289,18 @@ impl gpui::Render for HostPanel {
             .text_color(fg_dim)
             .child(header)
             .child(status_banner)
-            // Content uses a simple vertical stack for now; in the future we can move to a
-            // grid if we want equal-height cards or multi-column layout.
-            .child(identity)
-            .child(services)
-            .child(metrics)
-            .child(planning)
+            .child(
+                div()
+                    .id("HostPanelScroll")
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .overflow_y_scroll()
+                    .child(identity)
+                    .child(services)
+                    .child(metrics)
+                    .child(planning),
+            )
     }
 }
 

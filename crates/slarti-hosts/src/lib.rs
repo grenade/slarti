@@ -260,15 +260,33 @@ fn render_group_block(
                         )
                         // status dot (placeholder color for now)
                         .child({
-                            // Determine status color from cached agent state: green if last_seen_ok, else gray
+                            // Determine status color from cached agent state:
+                            // - green: last_seen_ok == true
+                            // - yellow: last_seen_ok == false && last_deployed_version present and != expected
+                            // - red: last_seen_ok == false && last_deployed_version present and == expected
+                            // - gray: no state
+                            let expected = env!("CARGO_PKG_VERSION");
                             let color = (|| {
                                 if let Some(mut p) = dirs_next::data_local_dir() {
                                     p.push("slarti");
                                     p.push("agents");
                                     p.push(format!("{}.json", alias));
                                     if let Ok(s) = std::fs::read_to_string(p) {
-                                        if s.contains("\"last_seen_ok\": true") {
-                                            return gpui::green();
+                                        #[derive(serde::Deserialize)]
+                                        struct AgentState {
+                                            last_seen_ok: bool,
+                                            last_deployed_version: Option<String>,
+                                        }
+                                        if let Ok(st) = serde_json::from_str::<AgentState>(&s) {
+                                            if st.last_seen_ok {
+                                                return gpui::green();
+                                            }
+                                            if let Some(ver) = st.last_deployed_version {
+                                                if ver != expected {
+                                                    return gpui::yellow();
+                                                }
+                                                return gpui::red();
+                                            }
                                         }
                                     }
                                 }

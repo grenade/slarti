@@ -703,13 +703,39 @@ fn main() {
                         let ui_fg = term_cfg.theme.fg;
                         let terminal = cx.new(|cx| TerminalView::new(cx, term_cfg));
 
-                        // Build the host info panel (top half of right column).
+                        // Shared current alias for actions like Deploy
+                        let current_alias = Arc::new(std::sync::Mutex::new(None::<String>));
+                        let current_alias_for_deploy = current_alias.clone();
+
+                        // Build the host info panel (top half of right column) with a simplified Deploy callback.
+                        // For now, we only surface a confirmation-style status update and progress note,
+                        // deferring the actual deploy/run logic to a later change to unblock the build.
                         let host_info = cx.new(make_host_panel(HostInfoProps {
                             selected_alias: None,
+                            on_deploy: None,
                         }));
+
+                        // Wire deploy callback now that we have the entity handle
+                        {
+                            let host_info_handle2 = host_info.clone();
+                            host_info.update(cx, |panel, cx| {
+                                let cb = {
+                                    let host_info_handle2 = host_info_handle2.clone();
+                                    Arc::new(move |_window: &mut Window, cx2: &mut Context<HostInfoPanel>| {
+                                        let _ = host_info_handle2.update(cx2, |panel2, cx2| {
+                                            panel2.set_status("confirm: deploy agent? (placeholder)", cx2);
+                                            panel2.set_checking(false, cx2);
+                                            panel2.push_progress("deployment flow pending implementation", cx2);
+                                        });
+                                    })
+                                };
+                                panel.set_on_deploy(Some(cb), cx);
+                            });
+                        }
 
                         // Build the hosts panel from parsed SSH config.
                         let host_info_handle = host_info.clone();
+                        let current_alias_sel = current_alias.clone();
                         let on_select = Arc::new(
                             move |alias: String,
                                   window: &mut Window,
@@ -723,6 +749,10 @@ fn main() {
                                     panel.clear_progress(cx);
                                     panel.push_progress("probing agent…", cx);
                                 });
+                                // Track the most recent alias for actions like Deploy
+                                if let Ok(mut g) = current_alias_sel.lock() {
+                                    *g = Some(alias.clone());
+                                }
 
                                 // Spawn an async task to check agent presence/version and persist state.
                                 let target = alias.clone();
