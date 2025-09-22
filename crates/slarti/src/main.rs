@@ -337,12 +337,6 @@ impl gpui::Render for ContainerView {
         let title_bar_bg = gpui::rgb(0x141414);
         let chrome_border = gpui::opaque_grey(0.2, 0.7);
         let text_color = gpui::hsla(self.ui_fg.0, self.ui_fg.1, self.ui_fg.2, self.ui_fg.3);
-        let debug_icons = std::env::var("SLARTI_UI_DEBUG")
-            .map(|v| {
-                let v = v.to_ascii_lowercase();
-                v == "1" || v == "true" || v == "yes" || v == "on"
-            })
-            .unwrap_or(false);
 
         // Header: custom titlebar with drag-to-move and icon buttons
         let header = div()
@@ -387,11 +381,6 @@ impl gpui::Render for ContainerView {
                     .child(
                         div()
                             .size(px(14.0))
-                            .when(debug_icons, |d| {
-                                d.bg(gpui::opaque_grey(0.4, 0.5))
-                                    .border_1()
-                                    .border_color(gpui::yellow())
-                            })
                             .window_control_area(gpui::WindowControlArea::Min)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_minimize))
@@ -405,11 +394,6 @@ impl gpui::Render for ContainerView {
                     .child(
                         div()
                             .size(px(14.0))
-                            .when(debug_icons, |d| {
-                                d.bg(gpui::opaque_grey(0.4, 0.5))
-                                    .border_1()
-                                    .border_color(gpui::yellow())
-                            })
                             .window_control_area(gpui::WindowControlArea::Max)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_maximize))
@@ -427,11 +411,6 @@ impl gpui::Render for ContainerView {
                     .child(
                         div()
                             .size(px(14.0))
-                            .when(debug_icons, |d| {
-                                d.bg(gpui::opaque_grey(0.4, 0.5))
-                                    .border_1()
-                                    .border_color(gpui::yellow())
-                            })
                             .window_control_area(gpui::WindowControlArea::Close)
                             .cursor_pointer()
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_close))
@@ -555,11 +534,6 @@ impl gpui::Render for ContainerView {
                 .child(
                     div()
                         .size(px(16.0))
-                        .when(debug_icons, |d| {
-                            d.bg(gpui::opaque_grey(0.4, 0.5))
-                                .border_1()
-                                .border_color(gpui::yellow())
-                        })
                         .cursor_pointer()
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_terminal))
                         .child(
@@ -675,6 +649,17 @@ impl gpui::Render for ContainerView {
 }
 
 fn main() {
+    // Initialize logging via tracing-subscriber to respect RUST_LOG
+    {
+        // Avoid initializing multiple times in tests or hot-reload scenarios.
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .try_init();
+        });
+    }
+
     Application::new()
         .with_assets(
             FsAssets::new().with_root(

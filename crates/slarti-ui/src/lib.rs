@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, svg, Hsla, Pixels};
+use gpui::{prelude::*, px, svg, Hsla, Pixels};
 use std::{
     env,
     path::{Path, PathBuf},
 };
+use tracing::debug;
 
 /// Vector is a tiny wrapper around `gpui::svg()` that makes it easy to:
 /// - specify a path to an SVG,
@@ -24,15 +25,8 @@ pub struct Vector {
 }
 
 /// Returns true when SLARTI_UI_DEBUG is enabled (e.g. "1", "true", "yes", "on").
-fn ui_debug_enabled() -> bool {
-    match env::var("SLARTI_UI_DEBUG") {
-        Ok(val) => {
-            let v = val.to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        }
-        Err(_) => false,
-    }
-}
+// Note: SLARTI_UI_DEBUG has been removed.
+// Use standard Rust logging (RUST_LOG) with tracing instead.
 
 fn resolve_asset_path(path: &Arc<str>) -> Arc<str> {
     let s: &str = path.as_ref();
@@ -174,14 +168,11 @@ impl Vector {
         let tint = self.color.unwrap_or_else(gpui::white);
         let resolved = resolve_asset_path(&self.path);
         let exists = Path::new(resolved.as_ref()).exists();
-        let debug = ui_debug_enabled();
-
-        if debug {
-            eprintln!(
-                "[slarti-ui::Vector] path='{}' resolved='{}' exists={} size=({:?},{:?}) color={:?}",
-                self.path, resolved, exists, self.width, self.height, tint
-            );
-        }
+        debug!(
+            target: "slarti_ui::vector",
+            "path='{}' resolved='{}' exists={} size=({:?},{:?}) color={:?}",
+            self.path, resolved, exists, self.width, self.height, tint
+        );
 
         // Prepare the SVG icon element (may render empty if asset is missing).
         let icon = svg()
@@ -191,18 +182,8 @@ impl Vector {
             .path(resolved)
             .text_color(tint);
 
-        // Wrapper with optional debug visuals and placeholder when missing.
-        div()
-            .flex_none()
-            .w(self.width)
-            .h(self.height)
-            .when(debug, |d| {
-                d.border_1()
-                    .border_color(gpui::yellow())
-                    .bg(gpui::green().opacity(0.15))
-            })
-            .when(debug && !exists, |d| d.text_color(gpui::red()).child("•"))
-            .child(icon)
+        // Return the icon directly; use tracing (RUST_LOG) for diagnostics above.
+        icon
     }
 }
 
