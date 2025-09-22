@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Bounds, Context, FocusHandle, Focusable, MouseButton,
-    MouseUpEvent, Pixels, Window,
+    div, prelude::*, px, AnyElement, App, Context, FocusHandle, Focusable, MouseButton,
+    MouseUpEvent, Window,
 };
 use slarti_sshcfg::model::{ConfigTree, FileNode, HostEntry};
 

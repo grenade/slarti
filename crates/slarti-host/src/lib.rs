@@ -1,6 +1,5 @@
 use gpui::{
-    div, prelude::*, px, App, Context, FocusHandle, Focusable, MouseButton, Pixels, SharedString,
-    Window,
+    div, prelude::*, px, App, Context, FocusHandle, Focusable, MouseButton, SharedString, Window,
 };
 use slarti_ui::Vector as UiVector;
 use std::sync::Arc;

@@ -7,8 +7,7 @@ use std::{
 use anyhow::Result;
 use gpui::{
     div, prelude::*, px, relative, App, Bounds, Context, Element, ElementId, FocusHandle,
-    Focusable, GlobalElementId, LayoutId, MouseUpEvent, Pixels, SharedString, Style, TextRun,
-    Window,
+    Focusable, GlobalElementId, LayoutId, Pixels, SharedString, Style, TextRun, Window,
 };
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
@@ -239,7 +238,7 @@ impl Engine {
 pub struct TerminalView {
     focus: FocusHandle,
     title: SharedString,
-    collapsed: bool,
+
     theme: Theme,
     engine: Arc<Mutex<Engine>>,
     writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
@@ -253,16 +252,11 @@ impl TerminalView {
         Self {
             focus: cx.focus_handle(),
             title: config.title,
-            collapsed: config.collapsed,
+
             theme: config.theme,
             engine: Arc::new(Mutex::new(engine)),
             writer,
         }
-    }
-
-    fn on_toggle(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.collapsed = !self.collapsed;
-        cx.notify();
     }
 
     /// Forward input bytes (e.g. typed characters or escape sequences) to the PTY.
@@ -514,7 +508,7 @@ impl Element for TerminalCanvasElement {
         ));
 
         // Shape and paint all rows each frame to ensure visibility (temporary simplification)
-        let (rows, cols, cursor_line, cursor_col) = if let Ok(eng) = self.engine.lock() {
+        let (_rows, _cols, _cursor_line, _cursor_col) = if let Ok(eng) = self.engine.lock() {
             (
                 eng.term.screen_lines(),
                 eng.term.columns(),
@@ -616,7 +610,6 @@ impl Element for TerminalCanvasElement {
                             alacritty_terminal::vte::ansi::Color::Indexed(i) => {
                                 to_color(palette[i as usize])
                             }
-                            _ => fg,
                         };
 
                         // Merge color runs
@@ -684,7 +677,7 @@ impl Element for TerminalCanvasElement {
 
             // Paint from cache
             if let Some(slot) = self.cache.get_mut(y) {
-                if let Some(mut shaped) = slot.take() {
+                if let Some(shaped) = slot.take() {
                     let _ = shaped.paint(origin, window.line_height(), window, cx);
                     *slot = Some(shaped);
                 }

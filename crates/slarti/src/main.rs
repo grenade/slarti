@@ -1,5 +1,5 @@
 use gpui::{
-    div, prelude::*, px, size, svg, App, Application, Bounds, Context, FocusHandle, Focusable,
+    div, prelude::*, px, size, App, Application, Bounds, Context, FocusHandle, Focusable,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window, WindowBounds,
     WindowOptions,
 };
@@ -11,9 +11,9 @@ use slarti_sshcfg as sshcfg;
 use slarti_ui::{FsAssets, Vector as UiVector};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, OnceLock};
-use std::thread;
+
+use std::sync::Arc;
+
 use std::time::Duration;
 
 /// Persisted UI settings
@@ -110,11 +110,6 @@ fn agent_state_path(alias: &str) -> std::path::PathBuf {
 }
 
 /// Load persisted deployment state for a host alias (if present).
-fn load_agent_state(alias: &str) -> Option<AgentDeploymentState> {
-    let path = agent_state_path(alias);
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<AgentDeploymentState>(&data).ok()
-}
 
 /// Save/update persisted deployment state for a host alias.
 fn save_agent_state(state: &AgentDeploymentState) -> std::io::Result<()> {
@@ -155,12 +150,12 @@ struct ContainerView {
     dragging_split: bool,
     last_split_y: f32,
     // Remote/selection state
-    selected_alias: Option<String>,
-    agent_status: RemoteAgentStatus,
+    _selected_alias: Option<String>,
+    _agent_status: RemoteAgentStatus,
     // Window state for custom titlebar behavior
     dragging_window: bool,
-    saved_windowed_bounds: Option<Bounds<Pixels>>,
-    is_maximized: bool,
+    _saved_windowed_bounds: Option<Bounds<Pixels>>,
+    _is_maximized: bool,
 }
 
 impl ContainerView {
@@ -182,11 +177,11 @@ impl ContainerView {
             split_top: load_ui_settings().split_top,
             dragging_split: false,
             last_split_y: 0.0,
-            selected_alias: None,
-            agent_status: RemoteAgentStatus::Unknown,
+            _selected_alias: None,
+            _agent_status: RemoteAgentStatus::Unknown,
             dragging_window: false,
-            saved_windowed_bounds: None,
-            is_maximized: false,
+            _saved_windowed_bounds: None,
+            _is_maximized: false,
         }
     }
 
@@ -471,7 +466,6 @@ impl gpui::Render for ContainerView {
                         .on_mouse_down(MouseButton::Left, cx.listener(Self::on_split_mouse_down))
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::on_split_mouse_up))
                         .on_mouse_up(MouseButton::Left, {
-                            let top_ref = &mut self.split_top;
                             cx.listener(
                                 move |this: &mut Self,
                                       _ev: &MouseUpEvent,
@@ -716,7 +710,7 @@ fn main() {
                                         // Spawn background deployment without blocking UI.
                                         let host_handle2 = host_handle.clone();
                                         let current_alias_sel2 = current_alias_sel.clone();
-                                        window.spawn(cxp, async move |acx| {
+                                        let _ = window.spawn(cxp, async move |acx| {
                                             let _ = tokio::runtime::Builder::new_current_thread()
                                                 .enable_all()
                                                 .build()
@@ -1074,7 +1068,7 @@ fn main() {
             // Save window bounds on every next frame (cheap sampling), and also on app quit.
             let window_clone = window;
             window_clone
-                .update(cx, |_, win, cx| {
+                .update(cx, |_, win, _cx| {
                     win.on_next_frame(move |w, _cx| {
                         let b = w.bounds();
                         let mut ui = load_ui_settings();
