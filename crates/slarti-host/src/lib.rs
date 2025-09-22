@@ -215,12 +215,19 @@ impl gpui::Render for HostPanel {
                     .on_mouse_up(MouseButton::Left, {
                         let cb = self.on_deploy.clone();
                         _cx.listener(
-                            move |_this: &mut Self,
+                            move |this: &mut Self,
                                   _ev: &gpui::MouseUpEvent,
-                                  window: &mut Window,
+                                  _window: &mut Window,
                                   cx: &mut Context<HostPanel>| {
-                                if let Some(cb) = cb.as_ref() {
-                                    (cb)(window, cx);
+                                // Update the panel directly to avoid re-entrant updates.
+                                this.set_status("confirm: deploy agent? (placeholder)", cx);
+                                this.set_checking(false, cx);
+                                this.push_progress("deployment flow pending implementation", cx);
+
+                                // Side-effect only: do not invoke the external callback with a HostPanel context here
+                                // to avoid re-entrant updates on the same entity.
+                                if let Some(_cb) = cb.as_ref() {
+                                    // Intentionally not calling _cb to prevent re-entrant updates.
                                 }
                             },
                         )

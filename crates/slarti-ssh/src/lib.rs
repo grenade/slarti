@@ -223,10 +223,30 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         .await
         .map_err(|_| anyhow!("ssh check timed out after {:?}", dur))?
         .context("failed to run ssh")?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
     if !out.status.success() {
-        // Surface stderr to aid diagnosis
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        // Normalize common "missing/not executable" cases to a non-fatal status so the UI can offer Deploy.
+        let code = out.status.code();
+        let looks_missing_or_not_exec = matches!(code, Some(126) | Some(127)) || // 126: found but not executable, 127: not found
+            stderr.contains("No such file or directory") ||
+            stderr.contains("not found") ||
+            stderr.contains("Permission denied");
+
+        if looks_missing_or_not_exec {
+            return Ok(AgentStatus {
+                present: false,
+                version: None,
+                remote_path: remote_path.to_string(),
+                can_run: false,
+                stdout,
+                stderr,
+            });
+        }
+
+        // For other failures (e.g., ssh handshake/proxy issues), surface as an error.
         return Err(anyhow!(
             "ssh check failed (status={}): stderr=`{}`, stdout=`{}`",
             out.status,
@@ -234,9 +254,6 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
             stdout.trim()
         ));
     }
-
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
     // Extract first non-empty trimmed line as version, if any.
     let version = stdout
@@ -246,10 +263,10 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         .map(|s| s.to_string());
 
     Ok(AgentStatus {
-        present: out.status.success() && version.is_some(),
+        present: version.is_some(),
         version,
         remote_path: remote_path.to_string(),
-        can_run: out.status.success(),
+        can_run: true,
         stdout,
         stderr,
     })
@@ -382,18 +399,49 @@ pub async fn deploy_agent(
         format!("$HOME/.local/share/slarti/agent/{}", version)
     };
     let remote_path = format!("{}/slarti-remote", remote_dir);
-    let tmp_path = format!(
-        "/tmp/slarti-remote-{}-upload-{}",
-        version,
-        std::process::id()
-    );
 
-    // Upload artifact via rsync first, fallback to scp if rsync fails.
+    // Ensure target directory exists on remote
+    let connect_timeout = format!("ConnectTimeout={}", timeout.as_secs());
+    let mut ssh_mkdir = TokioCommand::new("ssh");
+    ssh_mkdir.envs(std::env::vars());
+    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
+    if std::env::var("SLARTI_SSH_DEBUG").is_ok() {
+        ssh_mkdir.arg("-vvv");
+    }
+    ssh_mkdir
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(&connect_timeout)
+        .arg("-o")
+        .arg("Compression=yes")
+        .arg("-T")
+        .arg(target)
+        .arg("--")
+        .arg("sh")
+        .arg("-lc")
+        .arg(format!("mkdir -p \"{dir}\"", dir = remote_dir))
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let status = tokio::time::timeout(timeout, ssh_mkdir.status())
+        .await
+        .map_err(|_| anyhow!("ssh mkdir timed out after {:?}", timeout))??;
+
+    if !status.success() {
+        return Err(anyhow!("remote mkdir failed on {}", target));
+    }
+
+    // Upload artifact via rsync first directly to the final path, fallback to scp if rsync fails.
     let mut used_rsync = false;
-    let rsync_dst = format!("{}:{}", target, tmp_path);
+    let rsync_dst = format!("{}:{}", target, remote_path);
 
     let rsync_status = TokioCommand::new("rsync")
         .arg("-az")
+        .arg("--chmod=755")
         .arg(local_artifact.as_os_str())
         .arg(&rsync_dst)
         .stdin(Stdio::null())
@@ -410,10 +458,9 @@ pub async fn deploy_agent(
     }
 
     if !uploaded {
-        let scp_dst = rsync_dst; // same "target:tmp"
         let scp_status = TokioCommand::new("scp")
             .arg(local_artifact.as_os_str())
-            .arg(&scp_dst)
+            .arg(&rsync_dst)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -429,46 +476,39 @@ pub async fn deploy_agent(
         return Err(anyhow!("failed to upload agent (rsync/scp) to {}", target));
     }
 
-    // Install on remote: create dir, move binary, chmod.
-    // We treat the local_artifact as a single binary (rsync/scp with -z for compression if needed).
-    let install_script = format!(
-        "DIR={dir}; TMP={tmp}; mkdir -p \"$DIR\" && mv \"$TMP\" \"$DIR/slarti-remote\" && chmod 755 \"$DIR/slarti-remote\"",
-        dir = remote_dir,
-        tmp = tmp_path
-    );
+    // Ensure executable permissions on the remote binary only if scp fallback was used
+    if !used_rsync {
+        let mut ssh_chmod = TokioCommand::new("ssh");
+        ssh_chmod.envs(std::env::vars());
+        if std::env::var("SLARTI_SSH_DEBUG").is_ok() {
+            ssh_chmod.arg("-vvv");
+        }
+        ssh_chmod
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg("-o")
+            .arg(&connect_timeout)
+            .arg("-o")
+            .arg("Compression=yes")
+            .arg("-T")
+            .arg(target)
+            .arg("--")
+            .arg("sh")
+            .arg("-lc")
+            .arg(format!("chmod 755 \"{path}\"", path = remote_path))
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
 
-    let connect_timeout = format!("ConnectTimeout={}", timeout.as_secs());
-    let mut ssh_install = TokioCommand::new("ssh");
-    ssh_install.envs(std::env::vars());
-    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
-    if std::env::var("SLARTI_SSH_DEBUG").is_ok() {
-        ssh_install.arg("-vvv");
-    }
-    ssh_install
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg(&connect_timeout)
-        .arg("-o")
-        .arg("Compression=yes")
-        .arg("-T")
-        .arg(target)
-        .arg("--")
-        .arg("sh")
-        .arg("-lc")
-        .arg(install_script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        let status = tokio::time::timeout(timeout, ssh_chmod.status())
+            .await
+            .map_err(|_| anyhow!("ssh chmod timed out after {:?}", timeout))??;
 
-    let status = tokio::time::timeout(timeout, ssh_install.status())
-        .await
-        .map_err(|_| anyhow!("ssh install timed out after {:?}", timeout))??;
-
-    if !status.success() {
-        return Err(anyhow!("remote install step failed on {}", target));
+        if !status.success() {
+            return Err(anyhow!("remote chmod failed on {}", target));
+        }
     }
 
     Ok(DeployResult {

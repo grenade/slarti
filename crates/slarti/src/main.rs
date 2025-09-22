@@ -706,12 +706,8 @@ fn main() {
                             host_info.update(cx, |panel, cx| {
                                 let cb = {
                                     let host_info_handle2 = host_info_handle2.clone();
-                                    Arc::new(move |_window: &mut Window, cx2: &mut Context<HostInfoPanel>| {
-                                        let _ = host_info_handle2.update(cx2, |panel2, cx2| {
-                                            panel2.set_status("confirm: deploy agent? (placeholder)", cx2);
-                                            panel2.set_checking(false, cx2);
-                                            panel2.push_progress("deployment flow pending implementation", cx2);
-                                        });
+                                    Arc::new(move |_window: &mut Window, _cx2: &mut Context<HostInfoPanel>| {
+                                        // intentionally left blank to avoid re-entrant updates
                                     })
                                 };
                                 panel.set_on_deploy(Some(cb), cx);
