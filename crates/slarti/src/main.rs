@@ -986,7 +986,7 @@ fn main() {
                                                                 if let Ok(hello) = client
                                                                     .hello(
                                                                         env!("CARGO_PKG_VERSION"),
-                                                                        Some(timeout),
+                                                                        Some(Duration::from_secs(8)),
                                                                     )
                                                                     .await
                                                                 {
@@ -1098,7 +1098,7 @@ fn main() {
                                                         match &state.last_deployed_version {
                                                             Some(v) if v != &version => "agent update required".to_string(),
                                                             Some(_) => "agent present but failed to connect".to_string(),
-                                                            None => "agent install required".to_string(),
+                                                            None => "agent present but failed to connect".to_string(),
                                                         }
                                                     };
                                                     let progress_done = sys_summary

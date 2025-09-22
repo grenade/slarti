@@ -148,12 +148,40 @@ impl AgentClient {
             id,
             client_version: client_version.to_string(),
         };
+
+        debug!(
+            target: "slarti_ssh",
+            "hello: sending Hello id={} client_version={}", id, client_version
+        );
         self.send_command(&cmd).await?;
+        debug!(target: "slarti_ssh", "hello: Hello sent, awaiting HelloAck (timeout={:?})", read_timeout);
 
         let resp = if let Some(dur) = read_timeout {
-            tokio::time::timeout(dur, self.read_response_line()).await??
+            match tokio::time::timeout(dur, self.read_response_line()).await {
+                Ok(Ok(r)) => {
+                    debug!(target: "slarti_ssh", "hello: received response within {:?}", dur);
+                    r
+                }
+                Ok(Err(e)) => {
+                    debug!(target: "slarti_ssh", "hello: read_error: {}", e);
+                    return Err(e);
+                }
+                Err(_) => {
+                    debug!(target: "slarti_ssh", "hello: timed out after {:?}", dur);
+                    return Err(anyhow!("hello timeout after {:?}", dur));
+                }
+            }
         } else {
-            self.read_response_line().await?
+            match self.read_response_line().await {
+                Ok(r) => {
+                    debug!(target: "slarti_ssh", "hello: received response (no timeout)");
+                    r
+                }
+                Err(e) => {
+                    debug!(target: "slarti_ssh", "hello: read_error (no timeout): {}", e);
+                    return Err(e);
+                }
+            }
         };
 
         match resp {
@@ -161,14 +189,27 @@ impl AgentClient {
                 id: rid,
                 agent_version,
                 capabilities,
-            } if rid == id => Ok(HelloAck {
-                agent_version,
-                capabilities,
-            }),
+            } if rid == id => {
+                debug!(
+                    target: "slarti_ssh",
+                    "hello: ack ok id={} agent_version={} caps={}",
+                    rid,
+                    agent_version,
+                    capabilities.len()
+                );
+                Ok(HelloAck {
+                    agent_version,
+                    capabilities,
+                })
+            }
             Response::Error { id: rid, message } if rid == id => {
+                debug!(target: "slarti_ssh", "hello: agent error id={} message={}", rid, message);
                 Err(anyhow!("agent hello error: {}", message))
             }
-            other => Err(anyhow!("unexpected response to Hello: {:?}", other)),
+            other => {
+                debug!(target: "slarti_ssh", "hello: unexpected response: {:?}", other);
+                Err(anyhow!("unexpected response to Hello: {:?}", other))
+            }
         }
     }
 
