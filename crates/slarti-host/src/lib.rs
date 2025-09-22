@@ -41,6 +41,10 @@ pub struct HostPanel {
     sys_info: Option<proto::SysInfo>,
     // Latest services list received from the remote agent
     services: Option<Vec<proto::ServiceInfo>>,
+    // Services filter state
+    service_filter: ServiceFilter,
+    // Whether to include disabled services in the list
+    show_disabled: bool,
 }
 
 impl HostPanel {
@@ -59,6 +63,8 @@ impl HostPanel {
             recent_hosts: Self::load_recent_hosts(),
             sys_info: None,
             services: None,
+            service_filter: ServiceFilter::All,
+            show_disabled: true,
         }
     }
 
@@ -221,6 +227,14 @@ impl HostPanel {
             .child(div().text_color(gpui::white()).child(title.into()))
             .child(div().text_color(fg_dim).child(body.into()))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceFilter {
+    All,
+    Active,
+    Failed,
+    Inactive,
 }
 
 impl Focusable for HostPanel {
@@ -435,23 +449,174 @@ impl gpui::Render for HostPanel {
             8.0,
         );
 
-        // Brief services list (first 10), if available
+        // Services filter controls and list (scrollable area handles overflow)
         let services_brief = if let Some(list) = &self.services {
+            // Filter buttons
+            let mk_filter_btn = |label: &str, active: bool| {
+                div()
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(border)
+                    .text_color(if active {
+                        gpui::white()
+                    } else {
+                        gpui::opaque_grey(1.0, 0.8)
+                    })
+                    .bg(if active {
+                        gpui::opaque_grey(0.2, 0.3)
+                    } else {
+                        gpui::hsla(0.0, 0.0, 0.07, 1.0)
+                    })
+            };
+
+            let filter_bar = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(px(8.0))
+                .py(px(6.0))
+                .border_b_1()
+                .border_color(border)
+                .child(
+                    mk_filter_btn("All", matches!(self.service_filter, ServiceFilter::All))
+                        .cursor_pointer()
+                        .on_mouse_up(MouseButton::Left, {
+                            _cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                this.service_filter = ServiceFilter::All;
+                                cx.notify();
+                            })
+                        })
+                        .child("All"),
+                )
+                .child(
+                    mk_filter_btn(
+                        "Active",
+                        matches!(self.service_filter, ServiceFilter::Active),
+                    )
+                    .cursor_pointer()
+                    .on_mouse_up(MouseButton::Left, {
+                        _cx.listener(|this: &mut Self, _ev, _w, cx| {
+                            this.service_filter = ServiceFilter::Active;
+                            cx.notify();
+                        })
+                    })
+                    .child("Active"),
+                )
+                .child(
+                    mk_filter_btn(
+                        "Failed",
+                        matches!(self.service_filter, ServiceFilter::Failed),
+                    )
+                    .cursor_pointer()
+                    .on_mouse_up(MouseButton::Left, {
+                        _cx.listener(|this: &mut Self, _ev, _w, cx| {
+                            this.service_filter = ServiceFilter::Failed;
+                            cx.notify();
+                        })
+                    })
+                    .child("Failed"),
+                )
+                .child(
+                    mk_filter_btn(
+                        "Inactive",
+                        matches!(self.service_filter, ServiceFilter::Inactive),
+                    )
+                    .cursor_pointer()
+                    .on_mouse_up(MouseButton::Left, {
+                        _cx.listener(|this: &mut Self, _ev, _w, cx| {
+                            this.service_filter = ServiceFilter::Inactive;
+                            cx.notify();
+                        })
+                    })
+                    .child("Inactive"),
+                )
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(border)
+                        .cursor_pointer()
+                        .text_color(gpui::white())
+                        .on_mouse_up(MouseButton::Left, {
+                            _cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                this.show_disabled = !this.show_disabled;
+                                cx.notify();
+                            })
+                        })
+                        .child(if self.show_disabled {
+                            "Hide disabled: off"
+                        } else {
+                            "Hide disabled: on"
+                        }),
+                );
+
+            // Apply filters
+            let filtered: Vec<&proto::ServiceInfo> = list
+                .iter()
+                .filter(|s| {
+                    // hide disabled if requested
+                    self.show_disabled || s.enabled != Some(false)
+                })
+                .filter(|s| match self.service_filter {
+                    ServiceFilter::All => true,
+                    ServiceFilter::Active => s.active_state == "active",
+                    ServiceFilter::Failed => s.active_state == "failed",
+                    ServiceFilter::Inactive => s.active_state == "inactive",
+                })
+                .collect();
+
+            // Stats
+            let total = filtered.len();
+            let active_cnt = filtered
+                .iter()
+                .filter(|s| s.active_state == "active")
+                .count();
+            let failed_cnt = filtered
+                .iter()
+                .filter(|s| s.active_state == "failed")
+                .count();
+
+            // Render rows
             let mut rows = Vec::new();
-            for s in list.iter() {
+            for s in filtered {
+                // Colorize by active state
+                let color = if s.active_state == "active" {
+                    gpui::green()
+                } else if s.active_state == "failed" {
+                    gpui::hsla(0.0, 0.8, 0.6, 1.0) // red-ish
+                } else if s.active_state == "activating" || s.active_state == "deactivating" {
+                    gpui::hsla(0.13, 0.8, 0.6, 1.0) // orange-ish
+                } else {
+                    gpui::opaque_grey(1.0, 0.85)
+                };
+
+                let mut line = format!("{} — {} {}", s.name, s.active_state, s.sub_state);
+                if s.enabled == Some(false) {
+                    line.push_str(" [disabled]");
+                } else if s.enabled == Some(true) {
+                    line.push_str(" [enabled]");
+                }
+
                 rows.push(
                     div()
                         .flex()
                         .items_center()
                         .h(px(20.0))
                         .px(px(8.0))
-                        .text_color(gpui::opaque_grey(1.0, 0.85))
-                        .child(format!("{} — {} {}", s.name, s.active_state, s.sub_state)),
+                        .text_color(if s.enabled == Some(false) {
+                            gpui::opaque_grey(1.0, 0.6)
+                        } else {
+                            color
+                        })
+                        .child(line),
                 );
             }
-            let total = list.len();
-            let active = list.iter().filter(|s| s.active_state == "active").count();
-            let failed = list.iter().filter(|s| s.active_state == "failed").count();
+
+            // Compose services section
             div()
                 .flex()
                 .flex_col()
@@ -461,9 +626,10 @@ impl gpui::Render for HostPanel {
                 .py(px(8.0))
                 .border_b_1()
                 .border_color(border)
+                .child(filter_bar)
                 .child(div().text_color(gpui::white()).child(format!(
                     "Services (total {} active {} failed {})",
-                    total, active, failed
+                    total, active_cnt, failed_cnt
                 )))
                 .child(div().flex().flex_col().gap_1().children(rows))
         } else {
