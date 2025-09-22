@@ -1056,15 +1056,17 @@ fn main() {
                                                                             });
                                                                         }
                                                                     }
-                                                                    // Read the ServicesList response and add a brief summary
+                                                                    // Read the ServicesList response, store it, and add a brief summary
                                                                     if let Ok(resp3) = client.read_response_line().await {
                                                                         if let ProtoResponse::ServicesListOk { id: _, services } = resp3 {
                                                                             let total = services.len();
                                                                             let active = services.iter().filter(|s| s.active_state == "active").count();
                                                                             let failed = services.iter().filter(|s| s.active_state == "failed").count();
                                                                             let brief = format!("services: total {} active {} failed {}", total, active, failed);
+                                                                            let services_clone = services.clone();
                                                                             let _ = acx.update(|_w, cxu| {
                                                                                 let _ = host_handle.update(cxu, |panel, cxp| {
+                                                                                    panel.set_services(services_clone, cxp);
                                                                                     panel.push_progress(brief, cxp);
                                                                                 });
                                                                             });

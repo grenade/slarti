@@ -205,6 +205,7 @@ async fn services_list() -> Result<Vec<ServiceInfo>> {
         .arg("--type=service")
         .arg("--no-legend")
         .arg("--no-pager")
+        .arg("--plain")
         .output()
         .await
     {
@@ -234,6 +235,8 @@ async fn services_list() -> Result<Vec<ServiceInfo>> {
         .arg("--type=service")
         .arg("--no-legend")
         .arg("--no-pager")
+        .arg("--all")
+        .arg("--plain")
         .output()
         .await
     {

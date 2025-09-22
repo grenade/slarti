@@ -39,6 +39,8 @@ pub struct HostPanel {
     recent_hosts: Vec<String>,
     // Latest system info received from the remote agent
     sys_info: Option<proto::SysInfo>,
+    // Latest services list received from the remote agent
+    services: Option<Vec<proto::ServiceInfo>>,
 }
 
 impl HostPanel {
@@ -56,6 +58,7 @@ impl HostPanel {
             has_deployed: false,
             recent_hosts: Self::load_recent_hosts(),
             sys_info: None,
+            services: None,
         }
     }
 
@@ -176,6 +179,12 @@ impl HostPanel {
     /// Update the latest system info shown in the panel.
     pub fn set_sys_info(&mut self, info: proto::SysInfo, cx: &mut Context<Self>) {
         self.sys_info = Some(info);
+        cx.notify();
+    }
+
+    /// Update the latest services list shown in the panel.
+    pub fn set_services(&mut self, services: Vec<proto::ServiceInfo>, cx: &mut Context<Self>) {
+        self.services = Some(services);
         cx.notify();
     }
 
@@ -425,6 +434,41 @@ impl gpui::Render for HostPanel {
             },
             8.0,
         );
+
+        // Brief services list (first 10), if available
+        let services_brief = if let Some(list) = &self.services {
+            let mut rows = Vec::new();
+            for s in list.iter().take(10) {
+                rows.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .h(px(20.0))
+                        .px(px(8.0))
+                        .text_color(gpui::opaque_grey(1.0, 0.85))
+                        .child(format!("{} — {} {}", s.name, s.active_state, s.sub_state)),
+                );
+            }
+            let total = list.len();
+            let active = list.iter().filter(|s| s.active_state == "active").count();
+            let failed = list.iter().filter(|s| s.active_state == "failed").count();
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .pl(px(8.0))
+                .pr(px(8.0))
+                .py(px(8.0))
+                .border_b_1()
+                .border_color(border)
+                .child(div().text_color(gpui::white()).child(format!(
+                    "Services (total {} active {} failed {})",
+                    total, active, failed
+                )))
+                .child(div().flex().flex_col().gap_1().children(rows))
+        } else {
+            div()
+        };
 
         div()
             .flex()
