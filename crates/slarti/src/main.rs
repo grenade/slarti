@@ -1061,11 +1061,21 @@ fn main() {
                                                     // Compute status text and update HostPanel
                                                     let status_text = if state.last_seen_ok {
                                                         match &state.last_deployed_version {
-                                                            Some(v) => format!("connected v{}", v),
+                                                            Some(v) => {
+                                                                if v != &version {
+                                                                    format!("connected v{} (update required)", v)
+                                                                } else {
+                                                                    format!("connected v{}", v)
+                                                                }
+                                                            }
                                                             None => "connected".to_string(),
                                                         }
                                                     } else {
-                                                        "not present or incompatible".to_string()
+                                                        match &state.last_deployed_version {
+                                                            Some(v) if v != &version => "agent update required".to_string(),
+                                                            Some(_) => "agent present but failed to connect".to_string(),
+                                                            None => "agent install required".to_string(),
+                                                        }
                                                     };
                                                     let progress_done = sys_summary
                                                         .clone()

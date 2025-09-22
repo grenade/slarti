@@ -261,6 +261,14 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         out.stderr.len(),
         dbg_cmd
     );
+    let stdout_trimmed = stdout.trim();
+    if !stdout_trimmed.is_empty() {
+        debug!(target: "slarti_ssh", "check_agent stdout: {}", stdout_trimmed);
+    }
+    let stderr_trimmed = stderr.trim();
+    if !stderr_trimmed.is_empty() {
+        debug!(target: "slarti_ssh", "check_agent stderr: {}", stderr_trimmed);
+    }
 
     if !out.status.success() {
         // Normalize common "missing/not executable" cases to a non-fatal status so the UI can offer Deploy.
