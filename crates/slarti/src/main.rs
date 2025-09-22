@@ -721,7 +721,8 @@ fn main() {
                                         // Spawn background deployment without blocking UI.
                                         let host_handle2 = host_handle.clone();
                                         let current_alias_sel2 = current_alias_sel.clone();
-                                        let _ = window.spawn(cxp, async move |acx| {
+                                        window.spawn(cxp, async move |acx| {
+                                            tracing::debug!(target: "slarti_ssh", "deploy: starting background task");
                                             let _ = tokio::runtime::Builder::new_current_thread()
                                                 .enable_all()
                                                 .build()
@@ -856,7 +857,7 @@ fn main() {
                                                         }
                                                     })
                                                 });
-                                        });
+                                        }).detach();
                                     })
                                 };
                                 panel.set_on_deploy(Some(cb), cx);

@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
 use anyhow::{anyhow, Context as _, Result};
 use slarti_proto::{Command, Response};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -416,7 +416,7 @@ pub async fn remote_user_is_root(target: &str, dur: Duration) -> Result<bool> {
         .arg(target)
         .arg("--")
         .arg("sh")
-        .arg("-lc")
+        .arg("-c")
         .arg("id -u")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -471,15 +471,12 @@ pub async fn deploy_agent(
         format!("$HOME/.local/share/slarti/agent/{}", version)
     };
     let remote_path = format!("{}/slarti-remote", remote_dir);
+    debug!(target: "slarti_ssh", "deploy: target={} version={} remote_dir={} remote_path={} artifact={:?}", target, version, remote_dir, remote_path, local_artifact);
 
     // Ensure target directory exists on remote
     let connect_timeout = format!("ConnectTimeout={}", timeout.as_secs());
     let mut ssh_mkdir = TokioCommand::new("ssh");
     ssh_mkdir.envs(std::env::vars());
-    // Optional verbose debugging when SLARTI_SSH_DEBUG is set
-    if std::env::var("SLARTI_SSH_DEBUG").is_ok() {
-        ssh_mkdir.arg("-vvv");
-    }
     ssh_mkdir
         .arg("-o")
         .arg("BatchMode=yes")
@@ -488,34 +485,42 @@ pub async fn deploy_agent(
         .arg("-o")
         .arg(&connect_timeout)
         .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
         .arg("Compression=yes")
         .arg("-T")
         .arg(target)
         .arg("--")
         .arg("sh")
-        .arg("-lc")
+        .arg("-c")
         .arg(format!("mkdir -p \"{dir}\"", dir = remote_dir))
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    debug!(target: "slarti_ssh", "deploy: mkdir -p {}", remote_dir);
 
-    let status = tokio::time::timeout(timeout, ssh_mkdir.status())
+    let status = ssh_mkdir
+        .status()
         .await
-        .map_err(|_| anyhow!("ssh mkdir timed out after {:?}", timeout))??;
-
+        .context("ssh mkdir failed to run")?;
     if !status.success() {
         return Err(anyhow!("remote mkdir failed on {}", target));
     }
 
-    // Upload artifact via rsync first directly to the final path, fallback to scp if rsync fails.
+    // Upload artifact via rsync first to the directory; compute final path from basename.
     let mut used_rsync = false;
-    let rsync_dst = format!("{}:{}", target, remote_path);
+    let file_name = PathBuf::from(local_artifact)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "slarti-remote".to_string());
+    let rsync_dst_dir = format!("{}:{}", target, remote_dir);
+    debug!(target: "slarti_ssh", "deploy: rsync {:?} -> {}", local_artifact, rsync_dst_dir);
 
     let rsync_status = TokioCommand::new("rsync")
         .arg("-az")
         .arg("--chmod=755")
         .arg(local_artifact.as_os_str())
-        .arg(&rsync_dst)
+        .arg(&rsync_dst_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -523,6 +528,7 @@ pub async fn deploy_agent(
 
     let mut uploaded = false;
     if let Ok(Ok(status)) = tokio::time::timeout(timeout, rsync_status).await {
+        debug!(target: "slarti_ssh", "deploy: rsync status={}", status);
         if status.success() {
             used_rsync = true;
             uploaded = true;
@@ -530,14 +536,17 @@ pub async fn deploy_agent(
     }
 
     if !uploaded {
+        debug!(target: "slarti_ssh", "deploy: rsync failed or timed out, falling back to scp");
+        let scp_dst = format!("{}:{}/{}", target, remote_dir, file_name);
         let scp_status = TokioCommand::new("scp")
             .arg(local_artifact.as_os_str())
-            .arg(&rsync_dst)
+            .arg(&scp_dst)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status();
         if let Ok(Ok(status)) = tokio::time::timeout(timeout, scp_status).await {
+            debug!(target: "slarti_ssh", "deploy: scp status={}", status);
             if status.success() {
                 uploaded = true;
             }
@@ -548,13 +557,43 @@ pub async fn deploy_agent(
         return Err(anyhow!("failed to upload agent (rsync/scp) to {}", target));
     }
 
-    // Ensure executable permissions on the remote binary only if scp fallback was used
-    if !used_rsync {
+    // If the basename differs from expected "slarti-remote", move it into place.
+    if file_name != "slarti-remote" {
+        let mut ssh_mv = TokioCommand::new("ssh");
+        ssh_mv.envs(std::env::vars());
+        ssh_mv
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg("-o")
+            .arg(&connect_timeout)
+            .arg("-o")
+            .arg("ConnectionAttempts=1")
+            .arg("-o")
+            .arg("Compression=yes")
+            .arg("-T")
+            .arg(target)
+            .arg("--")
+            .arg("sh")
+            .arg("-c")
+            .arg(format!(
+                "mv \"{dir}/{name}\" \"{dir}/slarti-remote\" && chmod 755 \"{dir}/slarti-remote\"",
+                dir = remote_dir,
+                name = file_name
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        debug!(target: "slarti_ssh", "deploy: mv {} -> slarti-remote and chmod 755", file_name);
+        let mv_status = ssh_mv.status().await.context("ssh mv failed to run")?;
+        if !mv_status.success() {
+            return Err(anyhow!("remote move/chmod failed on {}", target));
+        }
+    } else if !used_rsync {
+        // Ensure executable permissions on the remote binary only if scp fallback was used
         let mut ssh_chmod = TokioCommand::new("ssh");
         ssh_chmod.envs(std::env::vars());
-        if std::env::var("SLARTI_SSH_DEBUG").is_ok() {
-            ssh_chmod.arg("-vvv");
-        }
         ssh_chmod
             .arg("-o")
             .arg("BatchMode=yes")
@@ -563,16 +602,19 @@ pub async fn deploy_agent(
             .arg("-o")
             .arg(&connect_timeout)
             .arg("-o")
+            .arg("ConnectionAttempts=1")
+            .arg("-o")
             .arg("Compression=yes")
             .arg("-T")
             .arg(target)
             .arg("--")
             .arg("sh")
-            .arg("-lc")
+            .arg("-c")
             .arg(format!("chmod 755 \"{path}\"", path = remote_path))
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        debug!(target: "slarti_ssh", "deploy: chmod 755 {}", remote_path);
 
         let status = tokio::time::timeout(timeout, ssh_chmod.status())
             .await
