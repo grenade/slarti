@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use slarti_proto::{Capability, Command, DirEntry, Response, SysInfo};
+use slarti_proto::{Capability, Command, DirEntry, Response, StaticConfig, SysInfo};
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -62,6 +62,10 @@ async fn handle_command(cmd: Command) -> Result<Response> {
         Command::SysInfo { id } => {
             let info = sys_info().await?;
             Ok(Response::SysInfoOk { id, info })
+        }
+        Command::StaticConfig { id } => {
+            let config = static_config().await?;
+            Ok(Response::StaticConfigOk { id, config })
         }
         Command::ListDir {
             id,
@@ -152,5 +156,37 @@ async fn sys_info() -> Result<SysInfo> {
         arch,
         uptime_secs,
         hostname,
+    })
+}
+
+async fn static_config() -> Result<StaticConfig> {
+    // /etc/os-release content (optional)
+    let os_release = match fs::read_to_string("/etc/os-release").await {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    };
+
+    // CPU count from /proc/cpuinfo
+    let cpu_count = match fs::read_to_string("/proc/cpuinfo").await {
+        Ok(s) => s.lines().filter(|l| l.starts_with("processor")).count() as u32,
+        Err(_) => 0,
+    };
+
+    // MemTotal from /proc/meminfo (in kB) -> bytes
+    let mem_total_bytes = match fs::read_to_string("/proc/meminfo").await {
+        Ok(s) => s
+            .lines()
+            .find(|l| l.starts_with("MemTotal:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+
+    Ok(StaticConfig {
+        os_release,
+        cpu_count,
+        mem_total_bytes,
     })
 }

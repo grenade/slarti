@@ -7,6 +7,8 @@ pub enum Command {
     Hello { id: u64, client_version: String },
     /// Fetch basic system information
     SysInfo { id: u64 },
+    /// Fetch static system configuration
+    StaticConfig { id: u64 },
     ListDir {
         id: u64,
         path: String,
@@ -28,6 +30,11 @@ pub enum Response {
     SysInfoOk {
         id: u64,
         info: SysInfo,
+    },
+    /// Static system configuration
+    StaticConfigOk {
+        id: u64,
+        config: StaticConfig,
     },
     ListDirOk {
         id: u64,
@@ -55,6 +62,13 @@ pub struct SysInfo {
     pub arch: String,
     pub uptime_secs: u64,
     pub hostname: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StaticConfig {
+    pub os_release: Option<String>,
+    pub cpu_count: u32,
+    pub mem_total_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

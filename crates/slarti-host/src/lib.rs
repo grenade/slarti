@@ -1,6 +1,7 @@
 use gpui::{
     div, prelude::*, px, App, Context, FocusHandle, Focusable, MouseButton, SharedString, Window,
 };
+use slarti_proto as proto;
 use slarti_ui::Vector as UiVector;
 use std::sync::Arc;
 
@@ -36,6 +37,8 @@ pub struct HostPanel {
     has_deployed: bool,
     // Recently selected hosts (most-recent first, unique)
     recent_hosts: Vec<String>,
+    // Latest system info received from the remote agent
+    sys_info: Option<proto::SysInfo>,
 }
 
 impl HostPanel {
@@ -52,6 +55,7 @@ impl HostPanel {
             deploy_running: false,
             has_deployed: false,
             recent_hosts: Self::load_recent_hosts(),
+            sys_info: None,
         }
     }
 
@@ -166,6 +170,12 @@ impl HostPanel {
         cx: &mut Context<Self>,
     ) {
         self.on_select_recent = cb;
+        cx.notify();
+    }
+
+    /// Update the latest system info shown in the panel.
+    pub fn set_sys_info(&mut self, info: proto::SysInfo, cx: &mut Context<Self>) {
+        self.sys_info = Some(info);
         cx.notify();
     }
 
@@ -386,21 +396,32 @@ impl gpui::Render for HostPanel {
         }
 
         // Default (host selected): keep existing layout for now.
-        // Minimal identity section while selected (placeholder retained for selected state only).
+        // Minimal identity section while selected: show SysInfo when available.
         let identity = self.render_section(
             "Identity",
-            match self.selected_alias.as_ref() {
-                Some(a) => {
+            match (self.selected_alias.as_ref(), self.sys_info.as_ref()) {
+                (Some(a), Some(info)) => {
+                    format!(
+                        "alias: {}\nhostname: {}\nos: {}\nkernel: {}\narch: {}\nuptime: {}s",
+                        a,
+                        info.hostname,
+                        info.os,
+                        info.kernel,
+                        info.arch,
+                        info.uptime_secs
+                    )
+                }
+                (Some(a), None) => {
                     let mut s = format!(
-                        "alias: {}\nhostname: (pending)\nuser: (pending)\nproxy: (pending)\nport: (pending)",
+                        "alias: {}\nhostname: (pending)\nos: (pending)\nkernel: (pending)\narch: (pending)\nuptime: (pending)",
                         a
                     );
                     if let Some(p) = &self.last_progress {
-                        s.push_str(&format!("\nsystem: {}", p));
+                        s.push_str(&format!("\nstatus: {}", p));
                     }
                     s
                 }
-                None => "No host selected.".into(),
+                (None, _) => "No host selected.".into(),
             },
             8.0,
         );

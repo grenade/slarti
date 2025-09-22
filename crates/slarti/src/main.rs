@@ -746,7 +746,7 @@ fn main() {
                                                             } else {
                                                                 format!("$HOME/.local/share/slarti/agent/{}", version)
                                                             };
-                                                            let remote_path = format!("{}/slarti-remote", remote_dir);
+                                                            let remote_path = format!("{remote_dir}/slarti-remote");
 
                                                             // Resolve local artifact (prefer release, fallback to debug).
                                                             let mut artifact = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1005,6 +1005,10 @@ fn main() {
                                                                     let _ = client
                                                                         .send_command(&ProtoCommand::SysInfo { id: 2 })
                                                                         .await;
+                                                                    // Queue StaticConfig immediately after SysInfo
+                                                                    let _ = client
+                                                                        .send_command(&ProtoCommand::StaticConfig { id: 3 })
+                                                                        .await;
 
                                                                     if let Ok(resp) = client.read_response_line().await {
                                                                         if let ProtoResponse::SysInfoOk { id: _, info } = resp {
@@ -1028,6 +1032,25 @@ fn main() {
                                                                                 serde_json::to_vec_pretty(&info)
                                                                                     .unwrap_or_else(|_| serde_json::to_vec(&info).unwrap()),
                                                                             );
+                                                                            // Update HostPanel with the latest SysInfo
+                                                                            let info_clone = info.clone();
+                                                                            let _ = acx.update(|_w, cxu| {
+                                                                                let _ = host_handle.update(cxu, |panel, cxp| {
+                                                                                    panel.set_sys_info(info_clone, cxp);
+                                                                                });
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                    // Read the StaticConfig response and show a brief summary
+                                                                    if let Ok(resp2) = client.read_response_line().await {
+                                                                        if let ProtoResponse::StaticConfigOk { id: _, config } = resp2 {
+                                                                            let gb = (config.mem_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).round() as u64;
+                                                                            let brief = format!("cpus:{} mem:{}GB", config.cpu_count, gb);
+                                                                            let _ = acx.update(|_w, cxu| {
+                                                                                let _ = host_handle.update(cxu, |panel, cxp| {
+                                                                                    panel.push_progress(brief.clone(), cxp);
+                                                                                });
+                                                                            });
                                                                         }
                                                                     }
                                                                 }

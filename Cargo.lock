@@ -5010,6 +5010,7 @@ dependencies = [
  "gpui",
  "serde",
  "serde_json",
+ "slarti-proto",
  "slarti-ui",
 ]
 

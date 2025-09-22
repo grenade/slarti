@@ -69,7 +69,7 @@ async fn ssh_run_capture(
         .arg("-T")
         .arg(target)
         .arg("--")
-        .arg(format!("'{}'", script))
+        .arg(script)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -249,8 +249,7 @@ pub struct HelloAck {
 ///
 /// Returns an `AgentStatus` with parsed stdout/stderr and basic flags.
 pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Result<AgentStatus> {
-    // Always pass a single-quoted remote command so the remote shell performs expansions.
-    let cmd = format!("{} --version", remote_path);
+    let cmd = format!("{remote_path} --version");
 
     let started = std::time::Instant::now();
     let (status, stdout, stderr) = ssh_run_capture(target, &cmd, dur).await?;
@@ -349,8 +348,7 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
         .arg("-T")
         .arg(target)
         .arg("--")
-        // Pass a single-quoted remote command so the remote shell expands $HOME and ~.
-        .arg(format!("'{} --stdio'", remote_path));
+        .arg(format!("{} --stdio", remote_path));
 
     debug!(target: "slarti_ssh", "run_agent: spawning (started {:?})", started);
 
