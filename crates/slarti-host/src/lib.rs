@@ -2,6 +2,7 @@ use gpui::{
     div, prelude::*, px, App, Context, FocusHandle, Focusable, MouseButton, Pixels, SharedString,
     Window,
 };
+use slarti_ui::Vector as UiVector;
 use std::sync::Arc;
 
 /// Properties for constructing a HostPanel.
@@ -28,6 +29,9 @@ pub struct HostPanel {
     last_progress: Option<SharedString>,
     // Optional deploy callback
     on_deploy: Option<Arc<dyn Fn(&mut Window, &mut Context<HostPanel>) + Send + Sync>>,
+    // Deployment state for button behavior/animation
+    deploy_running: bool,
+    has_deployed: bool,
 }
 
 impl HostPanel {
@@ -40,6 +44,8 @@ impl HostPanel {
             checking: false,
             last_progress: None,
             on_deploy: props.on_deploy,
+            deploy_running: false,
+            has_deployed: false,
         }
     }
 
@@ -81,6 +87,18 @@ impl HostPanel {
         cx: &mut Context<Self>,
     ) {
         self.on_deploy = cb;
+        cx.notify();
+    }
+
+    /// Update deployment running state (used to disable the button and animate the icon).
+    pub fn set_deploy_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        self.deploy_running = running;
+        cx.notify();
+    }
+
+    /// Mark that a deployment has completed at least once (changes button alt to Redeploy).
+    pub fn mark_deployed(&mut self, cx: &mut Context<Self>) {
+        self.has_deployed = true;
         cx.notify();
     }
 
@@ -202,32 +220,52 @@ impl gpui::Render for HostPanel {
                 .text_color(fg_dim)
                 .child(text);
             if !self.checking {
-                // Show a small 'Deploy agent' button when not checking
+                // While deployment is running, schedule continuous frames for blinking animation.
+                // animation framing disabled to avoid re-entrant updates; icon alpha will update on other UI events
+                // Visible icon button with fade animation while running.
+                let ms = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    % 1000) as f32;
+                let phase = ms / 1000.0;
+                let icon_alpha = if self.deploy_running {
+                    0.4 + 0.6 * ((phase * std::f32::consts::PI * 2.0).sin().abs())
+                } else {
+                    1.0
+                };
+                let icon_color = gpui::hsla(0.6, 0.7, 0.7, icon_alpha);
                 let btn = div()
                     .px(px(8.0))
                     .h(px(18.0))
                     .rounded_sm()
                     .border_1()
                     .border_color(border)
-                    .cursor_pointer()
                     .text_color(gpui::white())
-                    .child("Deploy agent")
+                    .when(!self.deploy_running, |d| d.cursor_pointer())
+                    .child(
+                        UiVector::new("assets/deploy.svg")
+                            .square(px(14.0))
+                            .color(icon_color)
+                            .render(),
+                    )
+                    // Trigger background deployment while keeping UI responsive.
                     .on_mouse_up(MouseButton::Left, {
                         let cb = self.on_deploy.clone();
                         _cx.listener(
                             move |this: &mut Self,
                                   _ev: &gpui::MouseUpEvent,
-                                  _window: &mut Window,
+                                  window: &mut Window,
                                   cx: &mut Context<HostPanel>| {
-                                // Update the panel directly to avoid re-entrant updates.
-                                this.set_status("confirm: deploy agent? (placeholder)", cx);
-                                this.set_checking(false, cx);
-                                this.push_progress("deployment flow pending implementation", cx);
-
-                                // Side-effect only: do not invoke the external callback with a HostPanel context here
-                                // to avoid re-entrant updates on the same entity.
-                                if let Some(_cb) = cb.as_ref() {
-                                    // Intentionally not calling _cb to prevent re-entrant updates.
+                                if this.deploy_running {
+                                    return;
+                                }
+                                this.set_deploy_running(true, cx);
+                                this.set_status("deploying…", cx);
+                                this.push_progress("uploading agent", cx);
+                                // Spawn async task to invoke external deploy logic without re-entrant updates.
+                                if let Some(cb) = cb.as_ref() {
+                                    (cb)(window, cx);
                                 }
                             },
                         )

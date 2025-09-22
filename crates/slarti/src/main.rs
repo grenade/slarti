@@ -6,12 +6,14 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 use slarti_host::{make_host_panel, HostPanel as HostInfoPanel, HostPanelProps as HostInfoProps};
 use slarti_hosts::{make_hosts_panel, HostsPanel, HostsPanelProps};
-use slarti_ssh::{check_agent, remote_user_is_root, run_agent};
+use slarti_ssh::{check_agent, deploy_agent, remote_user_is_root, run_agent};
 use slarti_sshcfg as sshcfg;
 use slarti_ui::{FsAssets, Vector as UiVector};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, OnceLock};
+use std::thread;
 use std::time::Duration;
 
 /// Persisted UI settings
@@ -703,11 +705,153 @@ fn main() {
                         // Wire deploy callback now that we have the entity handle
                         {
                             let host_info_handle2 = host_info.clone();
+                            let current_alias_for_deploy = current_alias_for_deploy.clone();
                             host_info.update(cx, |panel, cx| {
                                 let cb = {
-                                    let host_info_handle2 = host_info_handle2.clone();
-                                    Arc::new(move |_window: &mut Window, _cx2: &mut Context<HostInfoPanel>| {
-                                        // intentionally left blank to avoid re-entrant updates
+                                    let host_handle = host_info_handle2.clone();
+                                    let current_alias_sel = current_alias_for_deploy.clone();
+                                    Arc::new(move |window: &mut Window, cxp: &mut Context<HostInfoPanel>| {
+                                        // Initial UI state is handled by the HostPanel button handler to avoid re-entrant/private updates.
+
+                                        // Spawn background deployment without blocking UI.
+                                        let host_handle2 = host_handle.clone();
+                                        let current_alias_sel2 = current_alias_sel.clone();
+                                        window.spawn(cxp, async move |acx| {
+                                            let _ = tokio::runtime::Builder::new_current_thread()
+                                                .enable_all()
+                                                .build()
+                                                .map(|rt| {
+                                                    rt.block_on(async {
+                                                        // Determine target alias
+                                                        let target = current_alias_sel2
+                                                            .lock()
+                                                            .ok()
+                                                            .and_then(|g| g.clone());
+                                                        if let Some(target) = target {
+                                                            let version = env!("CARGO_PKG_VERSION").to_string();
+                                                            let timeout = Duration::from_secs(10);
+
+                                                            // Decide remote install path based on remote user.
+                                                            let is_root = remote_user_is_root(&target, timeout)
+                                                                .await
+                                                                .unwrap_or(false);
+                                                            let remote_dir = if is_root {
+                                                                format!("/usr/local/lib/slarti/agent/{}", version)
+                                                            } else {
+                                                                format!("$HOME/.local/share/slarti/agent/{}", version)
+                                                            };
+                                                            let remote_path = format!("{}/slarti-remote", remote_dir);
+
+                                                            // Resolve local artifact (prefer release, fallback to debug).
+                                                            let mut artifact = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                                                            artifact.push("../../target/release/slarti-remote");
+                                                            if !artifact.exists() {
+                                                                let mut dbg = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                                                                dbg.push("../../target/debug/slarti-remote");
+                                                                artifact = dbg;
+                                                            }
+
+                                                            if !artifact.exists() {
+                                                                let _ = acx.update(|_w, cxu| {
+                                                                    let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                        panel.set_status("deploy failed: local agent binary not found", cxu);
+                                                                        panel.push_progress("build slarti-remote first", cxu);
+                                                                        panel.set_deploy_running(false, cxu);
+                                                                    });
+                                                                });
+                                                                return;
+                                                            }
+
+                                                            // Upload/install
+                                                            let _ = acx.update(|_w, cxu| {
+                                                                let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                    panel.push_progress("uploading agent", cxu);
+                                                                });
+                                                            });
+
+                                                            match deploy_agent(&target, &artifact, &version, timeout).await {
+                                                                Ok(_res) => {
+                                                                    // Verify agent
+                                                                    let _ = acx.update(|_w, cxu| {
+                                                                        let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                            panel.push_progress("verifying agent", cxu);
+                                                                        });
+                                                                    });
+
+                                                                    match check_agent(&target, &remote_path, timeout).await {
+                                                                        Ok(status) if status.present && status.can_run => {
+                                                                            // Handshake
+                                                                            if let Ok(mut client) = run_agent(&target, &remote_path).await {
+                                                                                if let Ok(hello) = client.hello(env!("CARGO_PKG_VERSION"), Some(timeout)).await {
+                                                                                    let _ = acx.update(|_w, cxu| {
+                                                                                        let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                                            panel.set_status(format!("connected v{}", hello.agent_version), cxu);
+                                                                                            panel.set_deploy_running(false, cxu);
+                                                                                            panel.mark_deployed(cxu);
+                                                                                            panel.set_checking(false, cxu);
+                                                                                        });
+                                                                                    });
+                                                                                } else {
+                                                                                    let _ = acx.update(|_w, cxu| {
+                                                                                        let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                                            panel.set_status("agent responded, handshake failed", cxu);
+                                                                                            panel.set_deploy_running(false, cxu);
+                                                                                            panel.mark_deployed(cxu);
+                                                                                        });
+                                                                                    });
+                                                                                }
+                                                                                let _ = client.terminate().await;
+                                                                            } else {
+                                                                                let _ = acx.update(|_w, cxu| {
+                                                                                    let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                                        panel.set_status("agent started but could not open session", cxu);
+                                                                                        panel.set_deploy_running(false, cxu);
+                                                                                        panel.mark_deployed(cxu);
+                                                                                    });
+                                                                                });
+                                                                            }
+                                                                        }
+                                                                        Ok(_) => {
+                                                                            let _ = acx.update(|_w, cxu| {
+                                                                                let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                                    panel.set_status("agent deployed but not runnable", cxu);
+                                                                                    panel.set_deploy_running(false, cxu);
+                                                                                    panel.mark_deployed(cxu);
+                                                                                });
+                                                                            });
+                                                                        }
+                                                                        Err(e) => {
+                                                                            let msg = format!("agent verification failed: {}", e);
+                                                                            let _ = acx.update(|_w, cxu| {
+                                                                                let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                                    panel.set_status(msg, cxu);
+                                                                                    panel.set_deploy_running(false, cxu);
+                                                                                });
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    let msg = format!("deploy failed: {}", e);
+                                                                    let _ = acx.update(|_w, cxu| {
+                                                                        let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                            panel.set_status(msg, cxu);
+                                                                            panel.set_deploy_running(false, cxu);
+                                                                        });
+                                                                    });
+                                                                }
+                                                            }
+                                                        } else {
+                                                            let _ = acx.update(|_w, cxu| {
+                                                                let _ = host_handle2.update(cxu, |panel, cxu| {
+                                                                    panel.set_status("no target selected", cxu);
+                                                                    panel.set_deploy_running(false, cxu);
+                                                                });
+                                                            });
+                                                        }
+                                                    })
+                                                });
+                                        });
                                     })
                                 };
                                 panel.set_on_deploy(Some(cb), cx);
@@ -947,6 +1091,8 @@ fn main() {
 
             // Capture the container entity to forward keystrokes to the terminal panel.
             let container = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+
+            // Deploy callback is wired earlier via host_info.set_on_deploy; no additional wiring needed here.
 
             cx.observe_keystrokes(move |ev, _window, cx| {
                 if let Some(ch) = ev.keystroke.key_char.clone() {

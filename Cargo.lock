@@ -5008,6 +5008,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "slarti-ui",
 ]
 
 [[package]]

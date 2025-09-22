@@ -11,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 gpui = { workspace = true }
 anyhow = { workspace = true }
+slarti-ui = { path = "../slarti-ui" }
