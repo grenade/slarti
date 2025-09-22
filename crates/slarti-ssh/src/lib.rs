@@ -203,6 +203,8 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         .arg("-o")
         .arg(&connect_timeout)
         .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
         .arg("Compression=yes")
         .arg("-T")
         .arg(target)
@@ -210,7 +212,7 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
     if needs_shell {
         // Use a shell so $HOME / ~ expansion works on remote
         cmd.arg("sh")
-            .arg("-lc")
+            .arg("-c")
             .arg(format!("{} --version", remote_path));
     } else {
         cmd.arg(remote_path).arg("--version");
@@ -223,7 +225,7 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
             target
         );
         if needs_shell {
-            s.push_str(&format!("sh -lc '{} --version'", remote_path));
+            s.push_str(&format!("sh -c '{} --version'", remote_path));
         } else {
             s.push_str(&format!("{} --version", remote_path));
         }
@@ -234,27 +236,27 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let out = tokio::time::timeout(dur, cmd.output())
+    let out = cmd
+        .output()
         .await
-        .map_err(|_| {
-            let elapsed = started.elapsed();
-            anyhow!(
-                "ssh check timed out after {:?} (elapsed {:?}, cmd={})",
-                dur,
-                elapsed,
-                dbg_cmd
-            )
-        })?
-        .context("failed to run ssh")?;
+        .with_context(|| format!("failed to run ssh (cmd={})", dbg_cmd))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let exit_code = out.status.code();
+    #[cfg(unix)]
+    let exit_signal = std::os::unix::process::ExitStatusExt::signal(&out.status);
+    #[cfg(not(unix))]
+    let exit_signal: Option<i32> = None;
+
     debug!(
         target: "slarti_ssh",
-        "check_agent: target={} elapsed={:?} status={} stdout_len={} stderr_len={} cmd={}",
+        "check_agent: target={} elapsed={:?} status={} exit_code={:?} exit_signal={:?} stdout_len={} stderr_len={} cmd={}",
         target,
         started.elapsed(),
         out.status,
+        exit_code,
+        exit_signal,
         out.stdout.len(),
         out.stderr.len(),
         dbg_cmd
@@ -266,7 +268,9 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         let looks_missing_or_not_exec = matches!(code, Some(126) | Some(127)) || // 126: found but not executable, 127: not found
             stderr.contains("No such file or directory") ||
             stderr.contains("not found") ||
-            stderr.contains("Permission denied");
+            stderr.contains("Permission denied") ||
+            stderr.contains("Exec format error") ||     // ENOEXEC
+            stderr.contains("cannot execute"); // common shell error message
 
         if looks_missing_or_not_exec {
             return Ok(AgentStatus {
@@ -325,6 +329,8 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
         .arg("-o")
         .arg("ConnectTimeout=5")
         .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
         .arg("Compression=yes")
         .arg("-T")
         .arg(target)
@@ -332,7 +338,7 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
     if needs_shell {
         // Use a shell so $HOME / ~ expansion works on remote
         cmd.arg("sh")
-            .arg("-lc")
+            .arg("-c")
             .arg(format!("{} --stdio", remote_path));
     } else {
         cmd.arg(remote_path).arg("--stdio");
@@ -344,7 +350,7 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
             target
         );
         if needs_shell {
-            s.push_str(&format!("sh -lc '{} --stdio'", remote_path));
+            s.push_str(&format!("sh -c '{} --stdio'", remote_path));
         } else {
             s.push_str(&format!("{} --stdio", remote_path));
         }
@@ -395,6 +401,8 @@ pub async fn remote_user_is_root(target: &str, dur: Duration) -> Result<bool> {
         .arg("-o")
         .arg(&connect_timeout)
         .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
         .arg("Compression=yes")
         .arg("-T")
         .arg(target)
@@ -406,10 +414,20 @@ pub async fn remote_user_is_root(target: &str, dur: Duration) -> Result<bool> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let out = tokio::time::timeout(dur, cmd.output())
-        .await
-        .map_err(|_| anyhow!("ssh id -u timed out after {:?}", dur))?
-        .context("failed to run ssh for id -u")?;
+    let out = cmd.output().await.context("failed to run ssh for id -u")?;
+
+    let exit_code = out.status.code();
+    #[cfg(unix)]
+    let exit_signal = std::os::unix::process::ExitStatusExt::signal(&out.status);
+    #[cfg(not(unix))]
+    let exit_signal: Option<i32> = None;
+    debug!(
+        target: "slarti_ssh",
+        "remote_user_is_root: status={} exit_code={:?} exit_signal={:?}",
+        out.status,
+        exit_code,
+        exit_signal
+    );
 
     if !out.status.success() {
         return Ok(false);
