@@ -69,9 +69,7 @@ async fn ssh_run_capture(
         .arg("-T")
         .arg(target)
         .arg("--")
-        .arg("sh")
-        .arg("-lc")
-        .arg(script)
+        .arg(format!("'{}'", script))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -315,22 +313,11 @@ pub struct HelloAck {
 ///
 /// Returns an `AgentStatus` with parsed stdout/stderr and basic flags.
 pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Result<AgentStatus> {
-    // Execute remote binary directly; only use a shell when we actually need expansion.
-    let needs_shell = remote_path.contains('~') || remote_path.contains('$');
-    let cmd = if needs_shell {
-        format!("{} --version", remote_path)
-    } else {
-        // No shell expansions; pass as an argv vector through ssh.
-        // Our wrapper will avoid using a shell in this case.
-        String::new()
-    };
+    // Always pass a single-quoted remote command so the remote shell performs expansions.
+    let cmd = format!("{} --version", remote_path);
 
     let started = std::time::Instant::now();
-    let (status, stdout, stderr) = if needs_shell {
-        ssh_run_capture(target, &cmd, dur).await?
-    } else {
-        ssh_run_capture_argv(target, &[remote_path, "--version"], dur).await?
-    };
+    let (status, stdout, stderr) = ssh_run_capture(target, &cmd, dur).await?;
 
     let exit_code = status.code();
     #[cfg(unix)]
@@ -409,12 +396,10 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
 /// This does not perform the handshake automatically so the caller can decide how to handle
 /// version/capability mismatches.
 pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
-    let needs_shell = remote_path.contains('~') || remote_path.contains('$');
-
     let mut cmd = TokioCommand::new("ssh");
     let started = std::time::Instant::now();
     cmd.envs(std::env::vars());
-    debug!(target: "slarti_ssh", "run_agent: target={} remote_path={} needs_shell={}", target, remote_path, needs_shell);
+    debug!(target: "slarti_ssh", "run_agent: target={} remote_path={}", target, remote_path);
     cmd.arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -427,15 +412,9 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
         .arg("Compression=yes")
         .arg("-T")
         .arg(target)
-        .arg("--");
-
-    if needs_shell {
-        cmd.arg("sh")
-            .arg("-lc")
-            .arg(format!("{} --stdio", remote_path));
-    } else {
-        cmd.arg(remote_path).arg("--stdio");
-    }
+        .arg("--")
+        // Pass a single-quoted remote command so the remote shell expands $HOME and ~.
+        .arg(format!("'{} --stdio'", remote_path));
 
     debug!(target: "slarti_ssh", "run_agent: spawning (started {:?})", started);
 
@@ -512,7 +491,7 @@ pub async fn deploy_agent(
     );
 
     // Ensure target directory exists (shell expansion handles $HOME for non-root)
-    let mkdir_script = format!("mkdir -p -- {}", remote_dir_abs);
+    let mkdir_script = format!("'mkdir -p {remote_dir_abs}'");
     let (st_mkdir, _so_mkdir, _se_mkdir) = ssh_run_capture(target, &mkdir_script, timeout).await?;
     if !st_mkdir.success() {
         return Err(anyhow!("remote mkdir failed on {}", target));
