@@ -12,9 +12,20 @@ use slarti_ui::{FsAssets, Vector as UiVector};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use std::time::Duration;
+
+static BG_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn bg_rt() -> &'static tokio::runtime::Runtime {
+    BG_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("init background runtime")
+    })
+}
 
 /// Persisted UI settings
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -854,7 +865,22 @@ fn main() {
 
                         // Build the hosts panel from parsed SSH config.
                         let host_info_handle = host_info.clone();
+                        let host_info_handle_for_recent = host_info_handle.clone();
                         let current_alias_sel = current_alias.clone();
+
+                        // Load SSH config once and reuse for both tree rendering and selection path.
+                        let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {
+                            sshcfg::model::ConfigTree {
+                                root: sshcfg::model::FileNode {
+                                    path: std::path::PathBuf::from("~/.ssh/config"),
+                                    hosts: vec![],
+                                    includes: vec![],
+                                    matches: vec![],
+                                },
+                            }
+                        });
+                        let cfg_tree_for_select = cfg_tree.clone();
+
                         let on_select = Arc::new(
                             move |alias: String,
                                   window: &mut Window,
@@ -877,34 +903,25 @@ fn main() {
                                 let target = alias.clone();
                                 let version = env!("CARGO_PKG_VERSION").to_string();
                                 let host_handle = host_info_handle.clone();
+                                // Compute effective user locally from SSH config to avoid moving cfg_tree_for_select into the async closure,
+                                // keeping this on_select closure Fn rather than FnOnce.
+                                let user_is_root =
+                                    sshcfg::load::effective_user_for_alias(&cfg_tree_for_select, &target)
+                                        .as_deref()
+                                        == Some("root");
                                 window
                                     .spawn(hosts_cx, async move |acx| {
-                                        // Create a dedicated Tokio runtime to run ssh/process IO.
+                                        // Run SSH/process IO on the global background runtime.
                                         let mut sys_summary: Option<String> = None;
-                                        let _ = tokio::runtime::Builder::new_current_thread()
-                                            .enable_all()
-                                            .build()
-                                            .map(|rt| {
-                                                rt.block_on(async {
-                                                    // NOTE: rsync/scp deployment will respect your SSH config (including ProxyJump)
-                                                    // because we invoke the system ssh/rsync binaries and inherit environment.
-                                                    // Increase SSH operation timeout for slower or multi-hop (ProxyJump) connections.
-                                                    let timeout = Duration::from_secs(3);
+                                        bg_rt().block_on(async {
+                                            // NOTE: rsync/scp deployment will respect your SSH config (including ProxyJump)
+                                            // because we invoke the system ssh/rsync binaries and inherit environment.
+                                            // Increase SSH operation timeout for slower or multi-hop (ProxyJump) connections.
+                                            let timeout = Duration::from_secs(3);
 
-                                                    // Choose remote install path from SSH config (avoid SSH roundtrip).
-                                                    // If the configured User is "root" for this alias, use the system path; otherwise use user-level path.
-                                                    let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {
-                                                        sshcfg::model::ConfigTree {
-                                                            root: sshcfg::model::FileNode {
-                                                                path: std::path::PathBuf::from("~/.ssh/config"),
-                                                                hosts: vec![],
-                                                                includes: vec![],
-                                                                matches: vec![],
-                                                            },
-                                                        }
-                                                    });
-                                                    // replaced by sshcfg::load::effective_user_for_alias
-                                                    let user_is_root = sshcfg::load::effective_user_for_alias(&cfg_tree, &target).as_deref() == Some("root");
+                                            // Choose remote install path from SSH config (avoid SSH roundtrip).
+                                            // If the configured User is "root" for this alias, use the system path; otherwise use user-level path.
+                                            // user_is_root computed before spawn to avoid moving cfg_tree_for_select into this closure.
                                                     let remote_dir = if user_is_root {
                                                         format!("/usr/local/lib/slarti/agent/{}", version)
                                                     } else {
@@ -1041,23 +1058,37 @@ fn main() {
                                                                 );
                                                                 panel.set_checking(false, cx);
                                                             });
-                                                        });
                                                     });
-                                });
-                                })
-                                .detach();
+                                            });
+                                    })
+                                    .detach();
                             },
                         );
-                        let cfg_tree = sshcfg::load::load_user_config_tree().unwrap_or_else(|_| {
-                            sshcfg::model::ConfigTree {
-                                root: sshcfg::model::FileNode {
-                                    path: std::path::PathBuf::from("~/.ssh/config"),
-                                    hosts: vec![],
-                                    includes: vec![],
-                                    matches: vec![],
-                                },
-                            }
+
+                        // Wire recent selection in HostPanel to reuse the same selection flow.
+                        host_info.update(cx, |panel, cx| {
+                            let host_info_handle_recent = host_info_handle_for_recent.clone();
+                            let on_select_recent = {
+                                let current_alias_sel = current_alias.clone();
+                                let on_select_clone = on_select.clone();
+                                Arc::new(move |alias: String, window: &mut Window, _cxp: &mut Context<HostInfoPanel>| {
+                                    // Mirror HostsPanel selection: update HostPanel immediately, then run the same background flow.
+                                    let _ = host_info_handle_recent.update(_cxp, |panel2, cx2| {
+                                        panel2.set_selected_host(Some(alias.clone()), cx2);
+                                        panel2.set_status("checking", cx2);
+                                        panel2.set_checking(true, cx2);
+                                        panel2.clear_progress(cx2);
+                                        panel2.push_progress("probing agent…", cx2);
+                                    });
+                                    if let Ok(mut g) = current_alias_sel.lock() {
+                                        *g = Some(alias.clone());
+                                    }
+                                    (on_select_clone)(alias, window, unsafe { std::mem::transmute(_cxp) });
+                                })
+                            };
+                            panel.set_on_select_recent(Some(on_select_recent), cx);
                         });
+
                         let hosts = cx.new(make_hosts_panel(HostsPanelProps {
                             tree: cfg_tree,
                             on_select: on_select.clone(),

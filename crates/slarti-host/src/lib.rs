@@ -28,6 +28,9 @@ pub struct HostPanel {
     last_progress: Option<SharedString>,
     // Optional deploy callback
     on_deploy: Option<Arc<dyn Fn(&mut Window, &mut Context<HostPanel>) + Send + Sync>>,
+    // Optional recent-select callback (emitted when clicking a recent alias)
+    on_select_recent:
+        Option<Arc<dyn Fn(String, &mut Window, &mut Context<HostPanel>) + Send + Sync>>,
     // Deployment state for button behavior/animation
     deploy_running: bool,
     has_deployed: bool,
@@ -45,6 +48,7 @@ impl HostPanel {
             checking: false,
             last_progress: None,
             on_deploy: props.on_deploy,
+            on_select_recent: None,
             deploy_running: false,
             has_deployed: false,
             recent_hosts: Self::load_recent_hosts(),
@@ -152,6 +156,16 @@ impl HostPanel {
         cx: &mut Context<Self>,
     ) {
         self.on_deploy = cb;
+        cx.notify();
+    }
+
+    /// Set or update the recent-selection callback (invoked when clicking an item in Recents).
+    pub fn set_on_select_recent(
+        &mut self,
+        cb: Option<Arc<dyn Fn(String, &mut Window, &mut Context<HostPanel>) + Send + Sync>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_select_recent = cb;
         cx.notify();
     }
 
@@ -335,9 +349,13 @@ impl gpui::Render for HostPanel {
                             .child(a.clone())
                             .on_mouse_up(MouseButton::Left, {
                                 let alias2 = a.clone();
-                                _cx.listener(move |this: &mut Self, _ev: &gpui::MouseUpEvent, _w: &mut Window, cx: &mut Context<HostPanel>| {
-                                    // Update selection locally and persist recents.
-                                    this.set_selected_host(Some(alias2.clone()), cx);
+                                _cx.listener(move |this: &mut Self, _ev: &gpui::MouseUpEvent, w: &mut Window, cx: &mut Context<HostPanel>| {
+                                    if let Some(cb) = this.on_select_recent.as_ref() {
+                                        (cb)(alias2.clone(), w, cx);
+                                    } else {
+                                        // Fallback: update selection locally and persist recents.
+                                        this.set_selected_host(Some(alias2.clone()), cx);
+                                    }
                                 })
                             }),
                     );
