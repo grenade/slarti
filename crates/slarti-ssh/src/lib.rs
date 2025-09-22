@@ -10,8 +10,8 @@ This crate provides a small async API for:
 Notes:
 - This library shells out to the system `ssh` binary and thus inherits
   the user's SSH config (keys, ProxyJump, etc).
-- For deployment (rsync/scp), a follow-up will extend this crate with
-  file sync helpers.
+- All remote commands funnel through a generic ssh runner that captures
+  stdout/stderr and emits structured debug logs.
 
 Example:
 
@@ -45,6 +45,134 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command as TokioCommand};
 use tracing::debug;
+
+async fn ssh_run_capture(
+    target: &str,
+    script: &str,
+    dur: std::time::Duration,
+) -> anyhow::Result<(std::process::ExitStatus, String, String)> {
+    let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
+    let started = std::time::Instant::now();
+
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.envs(std::env::vars());
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(&connect_timeout)
+        .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
+        .arg("Compression=yes")
+        .arg("-T")
+        .arg(target)
+        .arg("--")
+        .arg("sh")
+        .arg("-lc")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let out = cmd.output().await.context("failed to run ssh")?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let exit_code = out.status.code();
+    #[cfg(unix)]
+    let exit_signal = std::os::unix::process::ExitStatusExt::signal(&out.status);
+    #[cfg(not(unix))]
+    let exit_signal: Option<i32> = None;
+
+    debug!(
+        target: "slarti_ssh",
+        "ssh_run_capture: target={} elapsed={:?} status={} exit_code={:?} exit_signal={:?} stdout_len={} stderr_len={}",
+        target,
+        started.elapsed(),
+        out.status,
+        exit_code,
+        exit_signal,
+        out.stdout.len(),
+        out.stderr.len(),
+    );
+
+    let stdout_trimmed = stdout.trim();
+    if !stdout_trimmed.is_empty() {
+        debug!(target: "slarti_ssh", "ssh_run_capture stdout: {}", stdout_trimmed);
+    }
+    let stderr_trimmed = stderr.trim();
+    if !stderr_trimmed.is_empty() {
+        debug!(target: "slarti_ssh", "ssh_run_capture stderr: {}", stderr_trimmed);
+    }
+
+    Ok((out.status, stdout, stderr))
+}
+
+async fn ssh_run_capture_argv(
+    target: &str,
+    argv: &[&str],
+    dur: std::time::Duration,
+) -> anyhow::Result<(std::process::ExitStatus, String, String)> {
+    let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
+    let started = std::time::Instant::now();
+
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.envs(std::env::vars());
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(&connect_timeout)
+        .arg("-o")
+        .arg("ConnectionAttempts=1")
+        .arg("-o")
+        .arg("Compression=yes")
+        .arg("-T")
+        .arg(target)
+        .arg("--");
+    for a in argv {
+        cmd.arg(a);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let out = cmd.output().await.context("failed to run ssh (argv)")?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let exit_code = out.status.code();
+    #[cfg(unix)]
+    let exit_signal = std::os::unix::process::ExitStatusExt::signal(&out.status);
+    #[cfg(not(unix))]
+    let exit_signal: Option<i32> = None;
+
+    tracing::debug!(
+        target: "slarti_ssh",
+        "ssh_run_capture_argv: target={} elapsed={:?} status={} exit_code={:?} exit_signal={:?} stdout_len={} stderr_len={}",
+        target,
+        started.elapsed(),
+        out.status,
+        exit_code,
+        exit_signal,
+        out.stdout.len(),
+        out.stderr.len(),
+    );
+
+    let stdout_trimmed = stdout.trim();
+    if !stdout_trimmed.is_empty() {
+        tracing::debug!(target: "slarti_ssh", "ssh_run_capture_argv stdout: {}", stdout_trimmed);
+    }
+    let stderr_trimmed = stderr.trim();
+    if !stderr_trimmed.is_empty() {
+        tracing::debug!(target: "slarti_ssh", "ssh_run_capture_argv stderr: {}", stderr_trimmed);
+    }
+
+    Ok((out.status, stdout, stderr))
+}
 
 /// Result of checking a remote agent via `ssh -T <target> -- <remote_path> --version`
 #[derive(Debug, Clone)]
@@ -187,79 +315,39 @@ pub struct HelloAck {
 ///
 /// Returns an `AgentStatus` with parsed stdout/stderr and basic flags.
 pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Result<AgentStatus> {
+    // Execute remote binary directly; only use a shell when we actually need expansion.
     let needs_shell = remote_path.contains('~') || remote_path.contains('$');
-
-    let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
-    let mut cmd = TokioCommand::new("ssh");
-    // Start timing and prepare a debuggable command string
-    let started = std::time::Instant::now();
-    let dbg_cmd: String;
-    cmd.envs(std::env::vars()); // inherit environment to respect user SSH config (SSH_AUTH_SOCK, etc.)
-    debug!(target: "slarti_ssh", "check_agent: target={} dur={:?} remote_path={} needs_shell={}", target, dur, remote_path, needs_shell);
-    cmd.arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg(&connect_timeout)
-        .arg("-o")
-        .arg("ConnectionAttempts=1")
-        .arg("-o")
-        .arg("Compression=yes")
-        .arg("-T")
-        .arg(target)
-        .arg("--");
-    if needs_shell {
-        // Use a shell so $HOME / ~ expansion works on remote
-        cmd.arg("sh")
-            .arg("-c")
-            .arg(format!("{} --version", remote_path));
+    let cmd = if needs_shell {
+        format!("{} --version", remote_path)
     } else {
-        cmd.arg(remote_path).arg("--version");
-    }
-    // Build a debuggable command string for diagnostics (does not affect execution)
-    dbg_cmd = {
-        let mut s = format!(
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o {} -o Compression=yes -T {} -- ",
-            &connect_timeout,
-            target
-        );
-        if needs_shell {
-            s.push_str(&format!("sh -c '{} --version'", remote_path));
-        } else {
-            s.push_str(&format!("{} --version", remote_path));
-        }
-        s
+        // No shell expansions; pass as an argv vector through ssh.
+        // Our wrapper will avoid using a shell in this case.
+        String::new()
     };
 
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let started = std::time::Instant::now();
+    let (status, stdout, stderr) = if needs_shell {
+        ssh_run_capture(target, &cmd, dur).await?
+    } else {
+        ssh_run_capture_argv(target, &[remote_path, "--version"], dur).await?
+    };
 
-    let out = cmd
-        .output()
-        .await
-        .with_context(|| format!("failed to run ssh (cmd={})", dbg_cmd))?;
-
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let exit_code = out.status.code();
+    let exit_code = status.code();
     #[cfg(unix)]
-    let exit_signal = std::os::unix::process::ExitStatusExt::signal(&out.status);
+    let exit_signal = std::os::unix::process::ExitStatusExt::signal(&status);
     #[cfg(not(unix))]
     let exit_signal: Option<i32> = None;
 
     debug!(
         target: "slarti_ssh",
-        "check_agent: target={} elapsed={:?} status={} exit_code={:?} exit_signal={:?} stdout_len={} stderr_len={} cmd={}",
+        "check_agent: target={} elapsed={:?} status={} exit_code={:?} exit_signal={:?} stdout_len={} stderr_len={}",
         target,
         started.elapsed(),
-        out.status,
+        status,
         exit_code,
         exit_signal,
-        out.stdout.len(),
-        out.stderr.len(),
-        dbg_cmd
+        stdout.len(),
+        stderr.len()
     );
     let stdout_trimmed = stdout.trim();
     if !stdout_trimmed.is_empty() {
@@ -270,15 +358,14 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
         debug!(target: "slarti_ssh", "check_agent stderr: {}", stderr_trimmed);
     }
 
-    if !out.status.success() {
+    if !status.success() {
         // Normalize common "missing/not executable" cases to a non-fatal status so the UI can offer Deploy.
-        let code = out.status.code();
-        let looks_missing_or_not_exec = matches!(code, Some(126) | Some(127)) || // 126: found but not executable, 127: not found
-            stderr.contains("No such file or directory") ||
-            stderr.contains("not found") ||
-            stderr.contains("Permission denied") ||
-            stderr.contains("Exec format error") ||     // ENOEXEC
-            stderr.contains("cannot execute"); // common shell error message
+        let looks_missing_or_not_exec = matches!(exit_code, Some(126) | Some(127))
+            || stderr.contains("No such file or directory")
+            || stderr.contains("not found")
+            || stderr.contains("Permission denied")
+            || stderr.contains("Exec format error")
+            || stderr.contains("cannot execute");
 
         if looks_missing_or_not_exec {
             return Ok(AgentStatus {
@@ -291,12 +378,11 @@ pub async fn check_agent(target: &str, remote_path: &str, dur: Duration) -> Resu
             });
         }
 
-        // For other failures (e.g., ssh handshake/proxy issues), surface as an error.
         return Err(anyhow!(
             "ssh check failed (status={}): stderr=`{}`, stdout=`{}`",
-            out.status,
-            stderr.trim(),
-            stdout.trim()
+            status,
+            stderr_trimmed,
+            stdout_trimmed
         ));
     }
 
@@ -327,7 +413,6 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
 
     let mut cmd = TokioCommand::new("ssh");
     let started = std::time::Instant::now();
-    let dbg_cmd: String;
     cmd.envs(std::env::vars());
     debug!(target: "slarti_ssh", "run_agent: target={} remote_path={} needs_shell={}", target, remote_path, needs_shell);
     cmd.arg("-o")
@@ -343,36 +428,20 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
         .arg("-T")
         .arg(target)
         .arg("--");
+
     if needs_shell {
-        // Use a shell so $HOME / ~ expansion works on remote
         cmd.arg("sh")
-            .arg("-c")
+            .arg("-lc")
             .arg(format!("{} --stdio", remote_path));
     } else {
         cmd.arg(remote_path).arg("--stdio");
     }
-    // Build a debuggable command string for diagnostics (does not affect execution)
-    dbg_cmd = {
-        let mut s = format!(
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o Compression=yes -T {} -- ",
-            target
-        );
-        if needs_shell {
-            s.push_str(&format!("sh -c '{} --stdio'", remote_path));
-        } else {
-            s.push_str(&format!("{} --stdio", remote_path));
-        }
-        s
-    };
-    debug!(
-        target: "slarti_ssh",
-        "run_agent: spawning: cmd={} (started {:?})",
-        dbg_cmd, started
-    );
+
+    debug!(target: "slarti_ssh", "run_agent: spawning (started {:?})", started);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit()); // inherit stderr to expose remote errors interactively
+        .stderr(Stdio::inherit());
 
     let mut child = cmd.spawn().context("spawn ssh -T for agent")?;
 
@@ -398,50 +467,8 @@ pub async fn run_agent(target: &str, remote_path: &str) -> Result<AgentClient> {
 /// Determine if the remote user is root by querying `id -u` over SSH.
 /// Returns true if the UID is 0.
 pub async fn remote_user_is_root(target: &str, dur: Duration) -> Result<bool> {
-    let connect_timeout = format!("ConnectTimeout={}", dur.as_secs());
-    let mut cmd = TokioCommand::new("ssh");
-    cmd.envs(std::env::vars());
-    debug!(target: "slarti_ssh", "remote_user_is_root: target={} dur={:?}", target, dur);
-    cmd.arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg(&connect_timeout)
-        .arg("-o")
-        .arg("ConnectionAttempts=1")
-        .arg("-o")
-        .arg("Compression=yes")
-        .arg("-T")
-        .arg(target)
-        .arg("--")
-        .arg("sh")
-        .arg("-c")
-        .arg("id -u")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let out = cmd.output().await.context("failed to run ssh for id -u")?;
-
-    let exit_code = out.status.code();
-    #[cfg(unix)]
-    let exit_signal = std::os::unix::process::ExitStatusExt::signal(&out.status);
-    #[cfg(not(unix))]
-    let exit_signal: Option<i32> = None;
-    debug!(
-        target: "slarti_ssh",
-        "remote_user_is_root: status={} exit_code={:?} exit_signal={:?}",
-        out.status,
-        exit_code,
-        exit_signal
-    );
-
-    if !out.status.success() {
-        return Ok(false);
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(stdout == "0")
+    let (_status, stdout, _stderr) = ssh_run_capture(target, "id -u", dur).await?;
+    Ok(stdout.trim() == "0")
 }
 
 /// Result of agent deployment.
@@ -463,71 +490,49 @@ pub async fn deploy_agent(
     version: &str,
     timeout: Duration,
 ) -> Result<DeployResult> {
-    // Decide installation paths based on remote user.
+    // Decide install dir based on remote user.
     let is_root = remote_user_is_root(target, timeout).await.unwrap_or(false);
-    let remote_dir = if is_root {
-        format!("/usr/local/lib/slarti/agent/{}", version)
+    let (remote_dir_abs, remote_dir_rsync_dst, remote_path_for_agent) = if is_root {
+        let dir = format!("/usr/local/lib/slarti/agent/{}", version);
+        (dir.clone(), dir.clone(), format!("{}/slarti-remote", dir))
     } else {
-        format!("$HOME/.local/share/slarti/agent/{}", version)
+        // For rsync, use relative-to-home path; for mkdir/mv/chmod use $HOME via the shell.
+        let rel = format!(".local/share/slarti/agent/{}", version);
+        (
+            format!("$HOME/{}", rel),
+            rel.clone(),
+            format!("$HOME/{}/slarti-remote", rel.clone()),
+        )
     };
-    let remote_path = format!("{}/slarti-remote", remote_dir);
-    debug!(target: "slarti_ssh", "deploy: target={} version={} remote_dir={} remote_path={} artifact={:?}", target, version, remote_dir, remote_path, local_artifact);
 
-    // Ensure target directory exists on remote
-    let connect_timeout = format!("ConnectTimeout={}", timeout.as_secs());
-    let mut ssh_mkdir = TokioCommand::new("ssh");
-    ssh_mkdir.envs(std::env::vars());
-    ssh_mkdir
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg(&connect_timeout)
-        .arg("-o")
-        .arg("ConnectionAttempts=1")
-        .arg("-o")
-        .arg("Compression=yes")
-        .arg("-T")
-        .arg(target)
-        .arg("--")
-        .arg("sh")
-        .arg("-c")
-        .arg(format!("mkdir -p \"{dir}\"", dir = remote_dir))
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    debug!(target: "slarti_ssh", "deploy: mkdir -p {}", remote_dir);
+    debug!(
+        target: "slarti_ssh",
+        "deploy: target={} version={} remote_dir_abs={} rsync_dst={} artifact={:?}",
+        target, version, remote_dir_abs, remote_dir_rsync_dst, local_artifact
+    );
 
-    let status = ssh_mkdir
-        .status()
-        .await
-        .context("ssh mkdir failed to run")?;
-    if !status.success() {
+    // Ensure target directory exists (shell expansion handles $HOME for non-root)
+    let mkdir_script = format!("mkdir -p -- {}", remote_dir_abs);
+    let (st_mkdir, _so_mkdir, _se_mkdir) = ssh_run_capture(target, &mkdir_script, timeout).await?;
+    if !st_mkdir.success() {
         return Err(anyhow!("remote mkdir failed on {}", target));
     }
 
-    // Upload artifact via rsync first to the directory; compute final path from basename.
-    let mut used_rsync = false;
-    let file_name = PathBuf::from(local_artifact)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "slarti-remote".to_string());
-    let rsync_dst_dir = format!("{}:{}", target, remote_dir);
-    debug!(target: "slarti_ssh", "deploy: rsync {:?} -> {}", local_artifact, rsync_dst_dir);
-
+    // Upload via rsync to directory (relative for non-root, absolute for root)
+    let rsync_dst = format!("{}:{}", target, remote_dir_rsync_dst);
+    debug!(target: "slarti_ssh", "deploy: rsync {:?} -> {}", local_artifact, rsync_dst);
     let rsync_status = TokioCommand::new("rsync")
         .arg("-az")
         .arg("--chmod=755")
         .arg(local_artifact.as_os_str())
-        .arg(&rsync_dst_dir)
+        .arg(&rsync_dst)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status();
-
     let mut uploaded = false;
-    if let Ok(Ok(status)) = tokio::time::timeout(timeout, rsync_status).await {
+    let mut used_rsync = false;
+    if let Ok(status) = rsync_status.await {
         debug!(target: "slarti_ssh", "deploy: rsync status={}", status);
         if status.success() {
             used_rsync = true;
@@ -535,21 +540,26 @@ pub async fn deploy_agent(
         }
     }
 
+    // Fallback to scp if needed
+    let file_name = PathBuf::from(local_artifact)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "slarti-remote".to_string());
     if !uploaded {
-        debug!(target: "slarti_ssh", "deploy: rsync failed or timed out, falling back to scp");
-        let scp_dst = format!("{}:{}/{}", target, remote_dir, file_name);
+        debug!(target: "slarti_ssh", "deploy: rsync failed, falling back to scp");
+        let scp_dst = format!("{}:{}/{}", target, remote_dir_rsync_dst, file_name);
         let scp_status = TokioCommand::new("scp")
             .arg(local_artifact.as_os_str())
             .arg(&scp_dst)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status();
-        if let Ok(Ok(status)) = tokio::time::timeout(timeout, scp_status).await {
-            debug!(target: "slarti_ssh", "deploy: scp status={}", status);
-            if status.success() {
-                uploaded = true;
-            }
+            .status()
+            .await
+            .context("scp failed to run")?;
+        debug!(target: "slarti_ssh", "deploy: scp status={}", scp_status);
+        if scp_status.success() {
+            uploaded = true;
         }
     }
 
@@ -557,76 +567,31 @@ pub async fn deploy_agent(
         return Err(anyhow!("failed to upload agent (rsync/scp) to {}", target));
     }
 
-    // If the basename differs from expected "slarti-remote", move it into place.
+    // If uploaded basename differs, move and chmod in a single remote script.
     if file_name != "slarti-remote" {
-        let mut ssh_mv = TokioCommand::new("ssh");
-        ssh_mv.envs(std::env::vars());
-        ssh_mv
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-o")
-            .arg(&connect_timeout)
-            .arg("-o")
-            .arg("ConnectionAttempts=1")
-            .arg("-o")
-            .arg("Compression=yes")
-            .arg("-T")
-            .arg(target)
-            .arg("--")
-            .arg("sh")
-            .arg("-c")
-            .arg(format!(
-                "mv \"{dir}/{name}\" \"{dir}/slarti-remote\" && chmod 755 \"{dir}/slarti-remote\"",
-                dir = remote_dir,
-                name = file_name
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        debug!(target: "slarti_ssh", "deploy: mv {} -> slarti-remote and chmod 755", file_name);
-        let mv_status = ssh_mv.status().await.context("ssh mv failed to run")?;
-        if !mv_status.success() {
+        let mv_script = format!(
+            "mv -- {dir}/{name} {dir}/slarti-remote && chmod 755 -- {dir}/slarti-remote",
+            dir = remote_dir_abs,
+            name = file_name
+        );
+        debug!(target: "slarti_ssh", "deploy: {}", mv_script);
+        let (st_mv, _so_mv, _se_mv) = ssh_run_capture(target, &mv_script, timeout).await?;
+        if !st_mv.success() {
             return Err(anyhow!("remote move/chmod failed on {}", target));
         }
     } else if !used_rsync {
-        // Ensure executable permissions on the remote binary only if scp fallback was used
-        let mut ssh_chmod = TokioCommand::new("ssh");
-        ssh_chmod.envs(std::env::vars());
-        ssh_chmod
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-o")
-            .arg(&connect_timeout)
-            .arg("-o")
-            .arg("ConnectionAttempts=1")
-            .arg("-o")
-            .arg("Compression=yes")
-            .arg("-T")
-            .arg(target)
-            .arg("--")
-            .arg("sh")
-            .arg("-c")
-            .arg(format!("chmod 755 \"{path}\"", path = remote_path))
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        debug!(target: "slarti_ssh", "deploy: chmod 755 {}", remote_path);
-
-        let status = tokio::time::timeout(timeout, ssh_chmod.status())
-            .await
-            .map_err(|_| anyhow!("ssh chmod timed out after {:?}", timeout))??;
-
-        if !status.success() {
+        // Ensure perms if we used scp
+        let chmod_script = format!("chmod 755 -- {}", remote_path_for_agent);
+        debug!(target: "slarti_ssh", "deploy: {}", chmod_script);
+        let (st_chmod, _so_chmod, _se_chmod) =
+            ssh_run_capture(target, &chmod_script, timeout).await?;
+        if !st_chmod.success() {
             return Err(anyhow!("remote chmod failed on {}", target));
         }
     }
 
     Ok(DeployResult {
-        remote_path,
+        remote_path: remote_path_for_agent,
         used_rsync,
     })
 }
