@@ -31,6 +31,8 @@ pub struct HostPanel {
     // Deployment state for button behavior/animation
     deploy_running: bool,
     has_deployed: bool,
+    // Recently selected hosts (most-recent first, unique)
+    recent_hosts: Vec<String>,
 }
 
 impl HostPanel {
@@ -45,12 +47,17 @@ impl HostPanel {
             on_deploy: props.on_deploy,
             deploy_running: false,
             has_deployed: false,
+            recent_hosts: Self::load_recent_hosts(),
         }
     }
 
     /// Update the selected host alias displayed by the panel.
     /// Call this from outside via entity.update to reflect host selection.
     pub fn set_selected_host(&mut self, alias: Option<String>, cx: &mut Context<Self>) {
+        if let Some(a) = alias.as_ref() {
+            self.push_recent(a);
+            let _ = Self::save_recent_hosts(&self.recent_hosts);
+        }
         self.selected_alias = alias;
         cx.notify();
     }
@@ -77,6 +84,65 @@ impl HostPanel {
     pub fn clear_progress(&mut self, cx: &mut Context<Self>) {
         self.last_progress = None;
         cx.notify();
+    }
+
+    /// Append an alias to the MRU list (dedupe, cap at 5).
+    fn push_recent(&mut self, alias: &str) {
+        self.recent_hosts.retain(|h| h != alias);
+        self.recent_hosts.insert(0, alias.to_string());
+        if self.recent_hosts.len() > 5 {
+            self.recent_hosts.truncate(5);
+        }
+    }
+
+    /// Load recent hosts from state dir.
+    fn load_recent_hosts() -> Vec<String> {
+        let path = Self::recent_state_path();
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(list) = serde_json::from_slice::<Vec<String>>(&bytes) {
+                return list;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Save recent hosts to state dir.
+    fn save_recent_hosts(list: &Vec<String>) -> std::io::Result<()> {
+        if let Some(dir) = Self::state_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let mut p = dir;
+            p.push("hosts_recent.json");
+            let data = serde_json::to_vec_pretty(list)
+                .unwrap_or_else(|_| serde_json::to_vec(list).unwrap());
+            std::fs::write(p, data)
+        } else {
+            // Fallback: HOME not set; no-op
+            Ok(())
+        }
+    }
+
+    /// Determine state directory: $XDG_STATE_HOME/slarti or ~/.local/state/slarti
+    fn state_dir() -> Option<std::path::PathBuf> {
+        if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+            let mut p = std::path::PathBuf::from(xdg);
+            p.push("slarti");
+            return Some(p);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let mut p = std::path::PathBuf::from(home);
+            p.push(".local");
+            p.push("state");
+            p.push("slarti");
+            return Some(p);
+        }
+        None
+    }
+
+    fn recent_state_path() -> std::path::PathBuf {
+        let mut p = Self::state_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let _ = std::fs::create_dir_all(&p);
+        p.push("hosts_recent.json");
+        p
     }
 
     /// Set or update the deploy callback used when clicking the "Deploy agent" button.
@@ -121,45 +187,6 @@ impl HostPanel {
             .border_color(border)
             .child(div().text_color(gpui::white()).child(title.into()))
             .child(div().text_color(fg_dim).child(body.into()))
-    }
-
-    fn render_cards<'a>(
-        &self,
-        title: impl Into<SharedString>,
-        hints: &[&str],
-        depth: f32,
-    ) -> impl IntoElement {
-        let border = gpui::opaque_grey(0.2, 0.7);
-        let fg_dim = gpui::opaque_grey(1.0, 0.85);
-
-        let mut rows = Vec::new();
-        for hint in hints {
-            rows.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(border)
-                    .text_color(fg_dim)
-                    .child((*hint).to_string()),
-            );
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .pl(px(depth))
-            .pr(px(8.0))
-            .py(px(8.0))
-            .border_b_1()
-            .border_color(border)
-            .child(div().text_color(gpui::white()).child(title.into()))
-            .child(div().flex().flex_col().gap_2().children(rows))
     }
 }
 
@@ -219,9 +246,7 @@ impl gpui::Render for HostPanel {
                 .text_color(fg_dim)
                 .child(text);
             if !self.checking {
-                // While deployment is running, schedule continuous frames for blinking animation.
-                // animation framing disabled to avoid re-entrant updates; icon alpha will update on other UI events
-                // Visible icon button with fade animation while running.
+                // Visible icon button (deploy/redeploy)
                 let ms = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -243,12 +268,11 @@ impl gpui::Render for HostPanel {
                     .text_color(gpui::white())
                     .when(!self.deploy_running, |d| d.cursor_pointer())
                     .child(
-                        UiVector::new("assets/deploy.svg")
+                        UiVector::new("assets/terminal_alt.svg")
                             .square(px(14.0))
                             .color(icon_color)
                             .render(),
                     )
-                    // Trigger background deployment while keeping UI responsive.
                     .on_mouse_up(MouseButton::Left, {
                         let cb = self.on_deploy.clone();
                         _cx.listener(
@@ -260,9 +284,15 @@ impl gpui::Render for HostPanel {
                                     return;
                                 }
                                 this.set_deploy_running(true, cx);
-                                this.set_status("deploying…", cx);
+                                this.set_status(
+                                    if this.has_deployed {
+                                        "redeploying…"
+                                    } else {
+                                        "deploying…"
+                                    },
+                                    cx,
+                                );
                                 this.push_progress("uploading agent", cx);
-                                // Spawn async task to invoke external deploy logic without re-entrant updates.
                                 if let Some(cb) = cb.as_ref() {
                                     (cb)(window, cx);
                                 }
@@ -275,11 +305,70 @@ impl gpui::Render for HostPanel {
             }
         };
 
-        // Placeholder sections to be wired with real data later:
-        // - Identity: alias, hostname, user, proxy jump chain, ssh port
-        // - Services/Workloads: systemd services not in baseline, containers, ports
-        // - Metrics: CPU, memory, disk, network utilization
-        // - Notes/Tags: user annotations to aid orchestration planning
+        // If no host selected, show invitation and recent hosts only.
+        if self.selected_alias.is_none() {
+            let invite = div()
+                .flex()
+                .items_center()
+                .h(px(36.0))
+                .px(px(8.0))
+                .text_color(gpui::white())
+                .child("No host selected. Select a host from the left to view details.");
+
+            // Recent list (up to 5)
+            let recent_list = {
+                let mut rows = Vec::new();
+                for alias in self.recent_hosts.iter().take(5) {
+                    let a = alias.clone();
+                    rows.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(28.0))
+                            .px(px(8.0))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(border)
+                            .cursor_pointer()
+                            .text_color(gpui::opaque_grey(1.0, 0.85))
+                            .child(a.clone())
+                            .on_mouse_up(MouseButton::Left, {
+                                let alias2 = a.clone();
+                                _cx.listener(move |this: &mut Self, _ev: &gpui::MouseUpEvent, _w: &mut Window, cx: &mut Context<HostPanel>| {
+                                    // Update selection locally and persist recents.
+                                    this.set_selected_host(Some(alias2.clone()), cx);
+                                })
+                            }),
+                    );
+                }
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pl(px(8.0))
+                    .pr(px(8.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(border)
+                    .child(div().text_color(gpui::white()).child("Recent"))
+                    .child(div().flex().flex_col().gap_2().children(rows))
+            };
+
+            return div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(bg)
+                .text_color(fg_dim)
+                .child(header)
+                .child(status_banner)
+                .child(invite)
+                .child(recent_list);
+        }
+
+        // Default (host selected): keep existing layout for now.
+        // Minimal identity section while selected (placeholder retained for selected state only).
         let identity = self.render_section(
             "Identity",
             match self.selected_alias.as_ref() {
@@ -293,35 +382,8 @@ impl gpui::Render for HostPanel {
                     }
                     s
                 }
-                None => "No host selected.\nSelect a host from the left to view details.".into(),
+                None => "No host selected.".into(),
             },
-            8.0,
-        );
-
-        let services = self.render_cards(
-            "Services & Workloads",
-            &[
-                "systemd: non-baseline services (pending)",
-                "containers: running images (pending)",
-                "listening ports (pending)",
-            ],
-            8.0,
-        );
-
-        let metrics = self.render_cards(
-            "Metrics (live snapshots)",
-            &[
-                "cpu: — (pending)",
-                "memory: — (pending)",
-                "disk: — (pending)",
-                "network: — (pending)",
-            ],
-            8.0,
-        );
-
-        let planning = self.render_section(
-            "Planning Notes",
-            "Add tags/notes to aid capacity and role assignment (pending).",
             8.0,
         );
 
@@ -340,10 +402,7 @@ impl gpui::Render for HostPanel {
                     .flex_col()
                     .size_full()
                     .overflow_y_scroll()
-                    .child(identity)
-                    .child(services)
-                    .child(metrics)
-                    .child(planning),
+                    .child(identity),
             )
     }
 }
