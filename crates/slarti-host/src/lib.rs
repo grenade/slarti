@@ -64,7 +64,7 @@ impl HostPanel {
             sys_info: None,
             services: None,
             service_filter: ServiceFilter::All,
-            show_disabled: true,
+            show_disabled: false,
         }
     }
 
@@ -477,8 +477,6 @@ impl gpui::Render for HostPanel {
                 .gap_2()
                 .px(px(8.0))
                 .py(px(6.0))
-                .border_b_1()
-                .border_color(border)
                 .child(
                     mk_filter_btn("All", matches!(self.service_filter, ServiceFilter::All))
                         .cursor_pointer()
@@ -601,18 +599,38 @@ impl gpui::Render for HostPanel {
                     line.push_str(" [enabled]");
                 }
 
+                let enabled_str = if s.enabled == Some(true) {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
                 rows.push(
                     div()
                         .flex()
                         .items_center()
+                        .justify_between()
                         .h(px(20.0))
                         .px(px(8.0))
-                        .text_color(if s.enabled == Some(false) {
-                            gpui::opaque_grey(1.0, 0.6)
-                        } else {
-                            color
-                        })
-                        .child(line),
+                        // three “columns”: name (left, flex), state (colored), enabled (dim if disabled)
+                        .child(
+                            div()
+                                .text_color(if s.enabled == Some(false) {
+                                    gpui::opaque_grey(1.0, 0.6)
+                                } else {
+                                    gpui::white()
+                                })
+                                .child(s.name.clone()),
+                        )
+                        .child(div().text_color(color).child(s.active_state.clone()))
+                        .child(
+                            div()
+                                .text_color(if s.enabled == Some(false) {
+                                    gpui::opaque_grey(1.0, 0.6)
+                                } else {
+                                    gpui::opaque_grey(1.0, 0.85)
+                                })
+                                .child(enabled_str),
+                        ),
                 );
             }
 
@@ -627,10 +645,6 @@ impl gpui::Render for HostPanel {
                 .border_b_1()
                 .border_color(border)
                 .child(filter_bar)
-                .child(div().text_color(gpui::white()).child(format!(
-                    "Services (total {} active {} failed {})",
-                    total, active_cnt, failed_cnt
-                )))
                 .child(div().flex().flex_col().gap_1().children(rows))
         } else {
             div()
