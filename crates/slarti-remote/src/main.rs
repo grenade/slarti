@@ -199,7 +199,37 @@ async fn static_config() -> Result<StaticConfig> {
 }
 
 fn parse_baseline_yaml(s: &str) -> HashSet<String> {
+    // Prefer robust YAML parsing; YAML 1.2 is a superset of JSON, so a JSON array is valid too.
+    // Accept either a YAML/JSON sequence of strings or fall back to a line-based parse.
     let mut set = HashSet::new();
+
+    // Try YAML/JSON list first
+    if let Ok(list) = serde_yaml::from_str::<Vec<String>>(s) {
+        for item in list {
+            let name = item.trim();
+            if !name.is_empty() {
+                set.insert(name.to_string());
+            }
+        }
+        return set;
+    }
+
+    // Try parsing a generic YAML value that might be a sequence of scalars
+    if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(s) {
+        if let Some(seq) = val.as_sequence() {
+            for v in seq {
+                if let Some(name) = v.as_str() {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        set.insert(name.to_string());
+                    }
+                }
+            }
+            return set;
+        }
+    }
+
+    // Fallback: line-based parsing (for extremely simple lists)
     for line in s.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
@@ -217,6 +247,7 @@ fn parse_baseline_yaml(s: &str) -> HashSet<String> {
             set.insert(name.to_string());
         }
     }
+
     set
 }
 
