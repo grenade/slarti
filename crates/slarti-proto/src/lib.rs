@@ -85,6 +85,7 @@ pub struct ServiceInfo {
     pub active_state: String,
     pub sub_state: String,
     pub enabled: Option<bool>,
+    pub baseline: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

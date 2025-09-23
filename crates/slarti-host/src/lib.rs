@@ -45,6 +45,8 @@ pub struct HostPanel {
     service_filter: ServiceFilter,
     // Whether to include disabled services in the list
     show_disabled: bool,
+    // Whether to include baseline (system) services in the list
+    show_baseline: bool,
 }
 
 impl HostPanel {
@@ -65,6 +67,7 @@ impl HostPanel {
             services: None,
             service_filter: ServiceFilter::All,
             show_disabled: false,
+            show_baseline: false,
         }
     }
 
@@ -550,6 +553,27 @@ impl gpui::Render for HostPanel {
                         } else {
                             "Hide disabled: on"
                         }),
+                )
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(border)
+                        .cursor_pointer()
+                        .text_color(gpui::white())
+                        .on_mouse_up(MouseButton::Left, {
+                            _cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                this.show_baseline = !this.show_baseline;
+                                cx.notify();
+                            })
+                        })
+                        .child(if self.show_baseline {
+                            "Hide baseline: off"
+                        } else {
+                            "Hide baseline: on"
+                        }),
                 );
 
             // Apply filters
@@ -558,6 +582,10 @@ impl gpui::Render for HostPanel {
                 .filter(|s| {
                     // hide disabled if requested
                     self.show_disabled || s.enabled != Some(false)
+                })
+                .filter(|s| {
+                    // hide baseline (system) services unless explicitly shown
+                    self.show_baseline || !s.baseline
                 })
                 .filter(|s| match self.service_filter {
                     ServiceFilter::All => true,
