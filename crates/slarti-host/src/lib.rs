@@ -608,10 +608,10 @@ impl gpui::Render for HostPanel {
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
                         .h(px(20.0))
                         .px(px(8.0))
-                        // three “columns”: name (left, flex), state (colored), enabled (dim if disabled)
+                        .justify_between()
+                        // name (left, flexible)
                         .child(
                             div()
                                 .text_color(if s.enabled == Some(false) {
@@ -621,15 +621,30 @@ impl gpui::Render for HostPanel {
                                 })
                                 .child(s.name.clone()),
                         )
-                        .child(div().text_color(color).child(s.active_state.clone()))
+                        // fixed-width right container for aligned columns
                         .child(
                             div()
-                                .text_color(if s.enabled == Some(false) {
-                                    gpui::opaque_grey(1.0, 0.6)
-                                } else {
-                                    gpui::opaque_grey(1.0, 0.85)
-                                })
-                                .child(enabled_str),
+                                .flex()
+                                .w(px(220.0))
+                                .justify_between()
+                                // state column (fixed width, colored)
+                                .child(
+                                    div()
+                                        .w(px(120.0))
+                                        .text_color(color)
+                                        .child(s.active_state.clone()),
+                                )
+                                // enabled column (fixed width, dim if disabled)
+                                .child(
+                                    div()
+                                        .w(px(100.0))
+                                        .text_color(if s.enabled == Some(false) {
+                                            gpui::opaque_grey(1.0, 0.6)
+                                        } else {
+                                            gpui::opaque_grey(1.0, 0.85)
+                                        })
+                                        .child(enabled_str),
+                                ),
                         ),
                 );
             }

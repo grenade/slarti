@@ -285,9 +285,11 @@ impl ContainerView {
             let y = window.mouse_position().y.0;
             let dy = y - self.last_split_y;
             self.last_split_y = y;
-            // Adjust split height and clamp to sane bounds
+            // Adjust split height and clamp to sane bounds (dynamic, allow very small terminal)
             let min_h = 120.0f32;
-            let max_h = 600.0f32;
+            let min_term = 60.0f32;
+            let win_h = window.bounds().size.height.0;
+            let max_h = (win_h - min_term).max(min_h);
             self.split_top = (self.split_top + dy).clamp(min_h, max_h);
             cx.notify();
         }
@@ -456,7 +458,14 @@ impl gpui::Render for ContainerView {
                     div()
                         .flex()
                         .flex_col()
-                        .h(px(self.split_top.clamp(120.0, 600.0)))
+                        .when(!self.terminal_collapsed, |d| {
+                            let min_h = 120.0f32;
+                            let min_term = 60.0f32;
+                            let win_h = window.bounds().size.height.0;
+                            let max_h = (win_h - min_term).max(min_h);
+                            d.h(px(self.split_top.clamp(min_h, max_h)))
+                        })
+                        .when(self.terminal_collapsed, |d| d.size_full())
                         .border_b_1()
                         .border_color(chrome_border)
                         // Simple remote status header above the Host panel
@@ -472,7 +481,7 @@ impl gpui::Render for ContainerView {
                 // Draggable split handle between top and bottom
                 .child(
                     div()
-                        .h(px(6.0))
+                        .h(px(if self.terminal_collapsed { 0.0 } else { 6.0 }))
                         .cursor_ns_resize()
                         .on_mouse_down(MouseButton::Left, cx.listener(Self::on_split_mouse_down))
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::on_split_mouse_up))
