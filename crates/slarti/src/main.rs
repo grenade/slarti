@@ -29,11 +29,14 @@ fn bg_rt() -> &'static tokio::runtime::Runtime {
 
 /// Persisted UI settings
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct UiSettings {
     /// Right column split top height in pixels
     split_top: f32,
     /// Last window bounds (windowed)
     last_window_bounds: Option<(i32, i32, u32, u32)>, // x, y, w, h
+    /// Whether the terminal is collapsed
+    terminal_collapsed: bool,
 }
 
 fn ui_settings_path() -> std::path::PathBuf {
@@ -54,6 +57,7 @@ fn load_ui_settings() -> UiSettings {
     UiSettings {
         split_top: 240.0,
         last_window_bounds: None,
+        terminal_collapsed: false,
     }
 }
 
@@ -182,7 +186,7 @@ impl ContainerView {
             terminal,
             hosts,
             host_info,
-            terminal_collapsed: false,
+            terminal_collapsed: load_ui_settings().terminal_collapsed,
             ui_fg,
             // load persisted UI settings (split position)
             split_top: load_ui_settings().split_top,
@@ -198,7 +202,17 @@ impl ContainerView {
 
     // Header controls: left menu is a placeholder for now.
     fn on_close(&mut self, _: &MouseUpEvent, window: &mut Window, _cx: &mut Context<Self>) {
-        // Close just removes the current window. A multi-window shell can intercept differently.
+        // Persist window bounds before closing, then remove the window.
+        let b = window.bounds();
+        let mut ui = load_ui_settings();
+        ui.last_window_bounds = Some((
+            b.origin.x.0 as i32,
+            b.origin.y.0 as i32,
+            b.size.width.0 as u32,
+            b.size.height.0 as u32,
+        ));
+        save_ui_settings(ui);
+
         window.remove_window();
     }
 
@@ -243,6 +257,11 @@ impl ContainerView {
         cx: &mut Context<Self>,
     ) {
         self.terminal_collapsed = !self.terminal_collapsed;
+        // Persist collapsed state and current split position
+        let mut ui = load_ui_settings();
+        ui.split_top = self.split_top;
+        ui.terminal_collapsed = self.terminal_collapsed;
+        save_ui_settings(ui);
         cx.notify();
     }
 

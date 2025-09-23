@@ -23,18 +23,19 @@ pub struct HostsPanel {
     focus: FocusHandle,
     tree: ConfigTree,
     on_select: Arc<dyn Fn(String, &mut Window, &mut Context<HostsPanel>) + Send + Sync>,
-    // In a follow-up pass we can persist/restore expansion state by keying these with canonical paths.
+    // Persisted expand/collapse state keyed by canonical group path
     expanded_groups: std::collections::HashSet<String>,
 }
 
 impl HostsPanel {
     pub fn new(cx: &mut Context<Self>, props: HostsPanelProps) -> Self {
-        let mut expanded = std::collections::HashSet::new();
-        // Expand the root "hosts" node by default.
-        expanded.insert("__root__".into());
-        // Expand first-level groups by default to make discovery easier.
-        for group in &props.tree.root.includes {
-            expanded.insert(group_key(&group.path));
+        // Try to load persisted expanded groups; if none, fall back to sensible defaults.
+        let mut expanded = load_expanded_groups();
+        if expanded.is_empty() {
+            expanded.insert("__root__".into());
+            for group in &props.tree.root.includes {
+                expanded.insert(group_key(&group.path));
+            }
         }
         Self {
             focus: cx.focus_handle(),
@@ -56,6 +57,8 @@ impl HostsPanel {
         } else {
             self.expanded_groups.insert(key);
         }
+        // Persist updated expansion state
+        let _ = save_expanded_groups(&self.expanded_groups);
         cx.notify();
     }
 
@@ -169,6 +172,49 @@ impl gpui::Render for HostsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_tree(&self.tree.root, window, cx)
     }
+}
+
+// -----------------------
+// Persistence utilities
+// -----------------------
+
+fn expanded_state_path() -> std::path::PathBuf {
+    // $XDG_STATE_HOME/slarti/hosts_expanded.json or ~/.local/state/slarti/hosts_expanded.json
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        let mut p = std::path::PathBuf::from(xdg);
+        p.push("slarti");
+        let _ = std::fs::create_dir_all(&p);
+        p.push("hosts_expanded.json");
+        return p;
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let mut p = std::path::PathBuf::from(home);
+        p.push(".local");
+        p.push("state");
+        p.push("slarti");
+        let _ = std::fs::create_dir_all(&p);
+        p.push("hosts_expanded.json");
+        return p;
+    }
+    // Fallback to current directory
+    std::path::PathBuf::from("hosts_expanded.json")
+}
+
+fn load_expanded_groups() -> std::collections::HashSet<String> {
+    let path = expanded_state_path();
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(vec) = serde_json::from_slice::<Vec<String>>(&bytes) {
+            return vec.into_iter().collect();
+        }
+    }
+    std::collections::HashSet::new()
+}
+
+fn save_expanded_groups(set: &std::collections::HashSet<String>) -> std::io::Result<()> {
+    let vec: Vec<String> = set.iter().cloned().collect();
+    let bytes =
+        serde_json::to_vec_pretty(&vec).unwrap_or_else(|_| serde_json::to_vec(&vec).unwrap());
+    std::fs::write(expanded_state_path(), bytes)
 }
 
 // -----------------
