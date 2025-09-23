@@ -1,6 +1,7 @@
 use gpui::{
     div, prelude::*, px, App, Context, FocusHandle, Focusable, MouseButton, SharedString, Window,
 };
+use serde::{Deserialize, Serialize};
 use slarti_proto as proto;
 use slarti_ui::Vector as UiVector;
 use std::sync::Arc;
@@ -52,6 +53,7 @@ pub struct HostPanel {
 impl HostPanel {
     /// Create a new HostPanel.
     pub fn new(cx: &mut Context<Self>, props: HostPanelProps) -> Self {
+        let (sd, sb) = Self::load_service_filter_prefs();
         Self {
             focus: cx.focus_handle(),
             selected_alias: props.selected_alias,
@@ -66,8 +68,8 @@ impl HostPanel {
             sys_info: None,
             services: None,
             service_filter: ServiceFilter::All,
-            show_disabled: false,
-            show_baseline: false,
+            show_disabled: sd,
+            show_baseline: sb,
         }
     }
 
@@ -163,6 +165,44 @@ impl HostPanel {
         let _ = std::fs::create_dir_all(&p);
         p.push("hosts_recent.json");
         p
+    }
+
+    fn service_filter_prefs_path() -> std::path::PathBuf {
+        let mut p = Self::state_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let _ = std::fs::create_dir_all(&p);
+        p.push("services_filter_prefs.json");
+        p
+    }
+
+    fn save_service_filter_prefs(show_disabled: bool, show_baseline: bool) -> std::io::Result<()> {
+        #[derive(Serialize, Deserialize)]
+        struct Prefs {
+            show_disabled: bool,
+            show_baseline: bool,
+        }
+        let prefs = Prefs {
+            show_disabled,
+            show_baseline,
+        };
+        let data = serde_json::to_vec_pretty(&prefs)
+            .unwrap_or_else(|_| serde_json::to_vec(&prefs).unwrap());
+        std::fs::write(Self::service_filter_prefs_path(), data)
+    }
+
+    fn load_service_filter_prefs() -> (bool, bool) {
+        #[derive(Serialize, Deserialize)]
+        struct Prefs {
+            show_disabled: bool,
+            show_baseline: bool,
+        }
+        let path = Self::service_filter_prefs_path();
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(p) = serde_json::from_slice::<Prefs>(&bytes) {
+                return (p.show_disabled, p.show_baseline);
+            }
+        }
+        // Defaults: hide disabled by default, show baseline by default
+        (false, true)
     }
 
     /// Set or update the deploy callback used when clicking the "Deploy agent" button.
@@ -455,7 +495,7 @@ impl gpui::Render for HostPanel {
         // Services filter controls and list (scrollable area handles overflow)
         let services_brief = if let Some(list) = &self.services {
             // Filter buttons
-            let mk_filter_btn = |label: &str, active: bool| {
+            let mk_filter_btn = |_label: &str, active: bool| {
                 div()
                     .px(px(6.0))
                     .py(px(2.0))
@@ -545,6 +585,10 @@ impl gpui::Render for HostPanel {
                         .on_mouse_up(MouseButton::Left, {
                             _cx.listener(|this: &mut Self, _ev, _w, cx| {
                                 this.show_disabled = !this.show_disabled;
+                                let _ = Self::save_service_filter_prefs(
+                                    this.show_disabled,
+                                    this.show_baseline,
+                                );
                                 cx.notify();
                             })
                         })
@@ -566,6 +610,10 @@ impl gpui::Render for HostPanel {
                         .on_mouse_up(MouseButton::Left, {
                             _cx.listener(|this: &mut Self, _ev, _w, cx| {
                                 this.show_baseline = !this.show_baseline;
+                                let _ = Self::save_service_filter_prefs(
+                                    this.show_disabled,
+                                    this.show_baseline,
+                                );
                                 cx.notify();
                             })
                         })
@@ -596,12 +644,12 @@ impl gpui::Render for HostPanel {
                 .collect();
 
             // Stats
-            let total = filtered.len();
-            let active_cnt = filtered
+            let _total = filtered.len();
+            let _active_cnt = filtered
                 .iter()
                 .filter(|s| s.active_state == "active")
                 .count();
-            let failed_cnt = filtered
+            let _failed_cnt = filtered
                 .iter()
                 .filter(|s| s.active_state == "failed")
                 .count();
