@@ -4,6 +4,7 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 use slarti_proto as proto;
 use slarti_ui::Vector as UiVector;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Properties for constructing a HostPanel.
@@ -42,6 +43,8 @@ pub struct HostPanel {
     sys_info: Option<proto::SysInfo>,
     // Latest services list received from the remote agent
     services: Option<Vec<proto::ServiceInfo>>,
+    // Local baseline service names (from ~/.config/slarti/baseline_services.yaml)
+    baseline_names: HashSet<String>,
     // Services filter state
     service_filter: ServiceFilter,
     // Whether to include disabled services in the list
@@ -67,6 +70,7 @@ impl HostPanel {
             recent_hosts: Self::load_recent_hosts(),
             sys_info: None,
             services: None,
+            baseline_names: Self::load_baseline_names(),
             service_filter: ServiceFilter::All,
             show_disabled: sd,
             show_baseline: sb,
@@ -172,6 +176,64 @@ impl HostPanel {
         let _ = std::fs::create_dir_all(&p);
         p.push("services_filter_prefs.json");
         p
+    }
+
+    fn baseline_config_path() -> std::path::PathBuf {
+        // Prefer XDG config: $XDG_CONFIG_HOME/slarti/baseline_services.yaml
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            let mut p = std::path::PathBuf::from(xdg);
+            p.push("slarti");
+            p.push("baseline_services.yaml");
+            return p;
+        }
+        // Fallback: ~/.config/slarti/baseline_services.yaml
+        if let Ok(home) = std::env::var("HOME") {
+            let mut p = std::path::PathBuf::from(home);
+            p.push(".config");
+            p.push("slarti");
+            p.push("baseline_services.yaml");
+            return p;
+        }
+        std::path::PathBuf::from("baseline_services.yaml")
+    }
+
+    fn load_baseline_names() -> HashSet<String> {
+        let path = Self::baseline_config_path();
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            // Try JSON array first (YAML 1.2 superset of JSON)
+            if let Ok(list) = serde_json::from_str::<Vec<String>>(&s) {
+                return list
+                    .into_iter()
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect();
+            }
+            // Fallback: very simple YAML-like line-based list (accept "- name" or plain lines)
+            let mut set = HashSet::new();
+            for line in s.lines() {
+                let t = line.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    continue;
+                }
+                let mut name = if t.starts_with('-') {
+                    t.trim_start_matches('-').trim()
+                } else {
+                    t
+                };
+                if name.starts_with('"') && name.ends_with('"') && name.len() >= 2 {
+                    name = &name[1..name.len() - 1];
+                }
+                if !name.is_empty() && !name.ends_with(':') {
+                    set.insert(name.to_string());
+                }
+            }
+            return set;
+        }
+        HashSet::new()
+    }
+
+    fn is_baseline(&self, name: &str) -> bool {
+        self.baseline_names.contains(name)
     }
 
     fn save_service_filter_prefs(show_disabled: bool, show_baseline: bool) -> std::io::Result<()> {
@@ -641,6 +703,10 @@ impl gpui::Render for HostPanel {
                     ServiceFilter::Failed => s.active_state == "failed",
                     ServiceFilter::Inactive => s.active_state == "inactive",
                 })
+                .filter(|s| {
+                    // hide baseline (system) services unless explicitly shown (local filtering)
+                    self.show_baseline || !self.is_baseline(&s.name)
+                })
                 .collect();
 
             // Stats
@@ -675,10 +741,10 @@ impl gpui::Render for HostPanel {
                     line.push_str(" [enabled]");
                 }
 
-                let enabled_str = if s.enabled == Some(true) {
-                    "enabled"
-                } else {
-                    "disabled"
+                let enabled_str = match s.enabled {
+                    Some(true) => "enabled",
+                    Some(false) => "disabled",
+                    None => "n/a",
                 };
                 rows.push(
                     div()

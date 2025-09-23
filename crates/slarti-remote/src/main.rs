@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
 use slarti_proto::{Capability, Command, DirEntry, Response, ServiceInfo, StaticConfig, SysInfo};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -198,88 +197,7 @@ async fn static_config() -> Result<StaticConfig> {
     })
 }
 
-fn parse_baseline_yaml(s: &str) -> HashSet<String> {
-    // Prefer robust YAML parsing; YAML 1.2 is a superset of JSON, so a JSON array is valid too.
-    // Accept either a YAML/JSON sequence of strings or fall back to a line-based parse.
-    let mut set = HashSet::new();
-
-    // Try YAML/JSON list first
-    if let Ok(list) = serde_yaml::from_str::<Vec<String>>(s) {
-        for item in list {
-            let name = item.trim();
-            if !name.is_empty() {
-                set.insert(name.to_string());
-            }
-        }
-        return set;
-    }
-
-    // Try parsing a generic YAML value that might be a sequence of scalars
-    if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(s) {
-        if let Some(seq) = val.as_sequence() {
-            for v in seq {
-                if let Some(name) = v.as_str() {
-                    let name = name.trim();
-                    if !name.is_empty() {
-                        set.insert(name.to_string());
-                    }
-                }
-            }
-            return set;
-        }
-    }
-
-    // Fallback: line-based parsing (for extremely simple lists)
-    for line in s.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        let mut name = if t.starts_with('-') {
-            t.trim_start_matches('-').trim()
-        } else {
-            t
-        };
-        if name.starts_with('"') && name.ends_with('"') && name.len() >= 2 {
-            name = &name[1..name.len() - 1];
-        }
-        if !name.is_empty() && !name.ends_with(':') {
-            set.insert(name.to_string());
-        }
-    }
-
-    set
-}
-
-const FALLBACK_BASELINE: &str = r#"
-- auditd.service
-- crond.service
-- systemd-journald.service
-- systemd-logind.service
-- dbus.service
-- sshd.service
-- NetworkManager.service
-- chronyd.service
-"#;
-
-fn baseline_set() -> &'static HashSet<String> {
-    static BASE: OnceLock<HashSet<String>> = OnceLock::new();
-    BASE.get_or_init(|| {
-        // Try user config: ~/.config/slarti/baseline_services.yaml
-        if let Some(mut p) = dirs_next::config_dir() {
-            p.push("slarti");
-            p.push("baseline_services.yaml");
-            if let Ok(s) = std::fs::read_to_string(&p) {
-                let set = parse_baseline_yaml(&s);
-                if !set.is_empty() {
-                    return set;
-                }
-            }
-        }
-        // Fallback embedded list
-        parse_baseline_yaml(FALLBACK_BASELINE)
-    })
-}
+// Baseline filtering is handled on the client UI; no remote filtering or config required.
 
 async fn services_list() -> Result<Vec<ServiceInfo>> {
     // Build enabled/disabled map from unit files
@@ -354,7 +272,7 @@ async fn services_list() -> Result<Vec<ServiceInfo>> {
                     active_state: active,
                     sub_state: sub,
                     enabled,
-                    baseline: baseline_set().contains(unit),
+                    baseline: false,
                 });
             }
         }
