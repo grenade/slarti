@@ -45,12 +45,13 @@ pub struct HostPanel {
     services: Option<Vec<proto::ServiceInfo>>,
     // Local baseline service names (from ~/.config/slarti/baseline_services.yaml)
     baseline_names: HashSet<String>,
-    // Services filter state
+    // Services filter state (by active state)
     service_filter: ServiceFilter,
-    // Whether to include disabled services in the list
-    show_disabled: bool,
-    // Whether to include baseline (system) services in the list
-    show_baseline: bool,
+    // When true (default), show only explicitly enabled services.
+    // When false, show services that are disabled or not explicitly enabled (enabled == Some(false) or None).
+    enabled_only: bool,
+    // When true, include baseline (system) services; when false (default), hide them.
+    include_baseline: bool,
 }
 
 impl HostPanel {
@@ -72,8 +73,8 @@ impl HostPanel {
             services: None,
             baseline_names: Self::load_baseline_names(),
             service_filter: ServiceFilter::All,
-            show_disabled: sd,
-            show_baseline: sb,
+            enabled_only: sd,
+            include_baseline: sb,
         }
     }
 
@@ -236,15 +237,18 @@ impl HostPanel {
         self.baseline_names.contains(name)
     }
 
-    fn save_service_filter_prefs(show_disabled: bool, show_baseline: bool) -> std::io::Result<()> {
+    fn save_service_filter_prefs(
+        enabled_only: bool,
+        include_baseline: bool,
+    ) -> std::io::Result<()> {
         #[derive(Serialize, Deserialize)]
         struct Prefs {
-            show_disabled: bool,
-            show_baseline: bool,
+            enabled_only: bool,
+            include_baseline: bool,
         }
         let prefs = Prefs {
-            show_disabled,
-            show_baseline,
+            enabled_only,
+            include_baseline,
         };
         let data = serde_json::to_vec_pretty(&prefs)
             .unwrap_or_else(|_| serde_json::to_vec(&prefs).unwrap());
@@ -254,17 +258,17 @@ impl HostPanel {
     fn load_service_filter_prefs() -> (bool, bool) {
         #[derive(Serialize, Deserialize)]
         struct Prefs {
-            show_disabled: bool,
-            show_baseline: bool,
+            enabled_only: bool,
+            include_baseline: bool,
         }
         let path = Self::service_filter_prefs_path();
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(p) = serde_json::from_slice::<Prefs>(&bytes) {
-                return (p.show_disabled, p.show_baseline);
+                return (p.enabled_only, p.include_baseline);
             }
         }
-        // Defaults: hide disabled by default, show baseline by default
-        (false, true)
+        // Defaults: enabled_only=true, include_baseline=false
+        (true, false)
     }
 
     /// Set or update the deploy callback used when clicking the "Deploy agent" button.
@@ -646,18 +650,18 @@ impl gpui::Render for HostPanel {
                         .text_color(gpui::white())
                         .on_mouse_up(MouseButton::Left, {
                             _cx.listener(|this: &mut Self, _ev, _w, cx| {
-                                this.show_disabled = !this.show_disabled;
+                                this.enabled_only = !this.enabled_only;
                                 let _ = Self::save_service_filter_prefs(
-                                    this.show_disabled,
-                                    this.show_baseline,
+                                    this.enabled_only,
+                                    this.include_baseline,
                                 );
                                 cx.notify();
                             })
                         })
-                        .child(if self.show_disabled {
-                            "Hide disabled: off"
+                        .child(if self.enabled_only {
+                            "Enabled only: on"
                         } else {
-                            "Hide disabled: on"
+                            "Enabled only: off"
                         }),
                 )
                 .child(
@@ -671,41 +675,44 @@ impl gpui::Render for HostPanel {
                         .text_color(gpui::white())
                         .on_mouse_up(MouseButton::Left, {
                             _cx.listener(|this: &mut Self, _ev, _w, cx| {
-                                this.show_baseline = !this.show_baseline;
+                                this.include_baseline = !this.include_baseline;
                                 let _ = Self::save_service_filter_prefs(
-                                    this.show_disabled,
-                                    this.show_baseline,
+                                    this.enabled_only,
+                                    this.include_baseline,
                                 );
                                 cx.notify();
                             })
                         })
-                        .child(if self.show_baseline {
-                            "Hide baseline: off"
+                        .child(if self.include_baseline {
+                            "Include baseline: on"
                         } else {
-                            "Hide baseline: on"
+                            "Include baseline: off"
                         }),
                 );
 
             // Apply filters
             let filtered: Vec<&proto::ServiceInfo> = list
                 .iter()
+                // Enabled checkbox semantics:
+                // - when enabled_only == true: include only explicitly enabled (enabled == Some(true))
+                // - when enabled_only == false: include disabled (Some(false)) and not explicitly enabled (None)
                 .filter(|s| {
-                    // hide disabled if requested
-                    self.show_disabled || s.enabled != Some(false)
+                    if self.enabled_only {
+                        s.enabled == Some(true)
+                    } else {
+                        s.enabled != Some(true)
+                    }
                 })
-                .filter(|s| {
-                    // hide baseline (system) services unless explicitly shown
-                    self.show_baseline || !s.baseline
-                })
+                // Baseline checkbox semantics:
+                // - when include_baseline == true: include even if baseline
+                // - when include_baseline == false: exclude if baseline
+                .filter(|s| self.include_baseline || !self.is_baseline(&s.name))
+                // State filter (composes with the above)
                 .filter(|s| match self.service_filter {
                     ServiceFilter::All => true,
                     ServiceFilter::Active => s.active_state == "active",
                     ServiceFilter::Failed => s.active_state == "failed",
                     ServiceFilter::Inactive => s.active_state == "inactive",
-                })
-                .filter(|s| {
-                    // hide baseline (system) services unless explicitly shown (local filtering)
-                    self.show_baseline || !self.is_baseline(&s.name)
                 })
                 .collect();
 
