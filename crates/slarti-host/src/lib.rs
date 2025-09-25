@@ -695,12 +695,12 @@ impl gpui::Render for HostPanel {
                 .iter()
                 // Enabled checkbox semantics:
                 // - when enabled_only == true: include only explicitly enabled (enabled == Some(true))
-                // - when enabled_only == false: include disabled (Some(false)) and not explicitly enabled (None)
+                // - when enabled_only == false: include all services (no enabled filter)
                 .filter(|s| {
                     if self.enabled_only {
                         s.enabled == Some(true)
                     } else {
-                        s.enabled != Some(true)
+                        true
                     }
                 })
                 // Baseline checkbox semantics:

@@ -208,6 +208,7 @@ async fn services_list() -> Result<Vec<ServiceInfo>> {
         .arg("--no-legend")
         .arg("--no-pager")
         .arg("--plain")
+        .arg("--full")
         .output()
         .await
     {
@@ -221,7 +222,7 @@ async fn services_list() -> Result<Vec<ServiceInfo>> {
                 let mut parts = line.split_whitespace();
                 if let (Some(name), Some(state)) = (parts.next(), parts.next()) {
                     let enabled = match state {
-                        "enabled" | "enabled-runtime" => Some(true),
+                        "enabled" | "enabled-runtime" | "linked" | "alias" => Some(true),
                         "disabled" => Some(false),
                         _ => None,
                     };
@@ -239,6 +240,7 @@ async fn services_list() -> Result<Vec<ServiceInfo>> {
         .arg("--no-pager")
         .arg("--all")
         .arg("--plain")
+        .arg("--full")
         .output()
         .await
     {
